@@ -15,9 +15,15 @@ export type AppearancePref = 'system' | 'light' | 'dark';
  */
 export type DevicePref = 'mobile' | 'desktop';
 
+export type EraserMode = 'object' | 'segment';
+
+/** Tools that can appear in the dock, in their default order. */
+export const DOCK_TOOLS = ['select', 'hand', 'pen', 'highlighter', 'eraser', 'laser', 'shape', 'dot', 'text', 'image'] as const;
+export type DockTool = (typeof DOCK_TOOLS)[number];
+
 export interface UIState {
   tool: Tool;
-  shapeKind: Exclude<ShapeKind, 'polygon'>;
+  shapeKind: ShapeKind;
   pen: ToolStyle;
   highlighter: ToolStyle;
   shape: ToolStyle & { fill: boolean };
@@ -30,6 +36,20 @@ export interface UIState {
   /** Which kind the Text tool places: a free text box or a sticky note. */
   textKind: 'text' | 'note';
   eraserSize: number;
+  /** Whole objects, or only the part of a stroke the eraser touches. */
+  eraserMode: EraserMode;
+  /** Ink smoothing 0–1 for new pen strokes. */
+  penSmoothing: number;
+  /** Use stylus pressure (and simulated pressure for touch/mouse); off = constant width. */
+  penPressure: boolean;
+  /** Moves, shapes and new objects snap to the page's grid. */
+  snapGrid: boolean;
+  /** Dock layout: visible tools in order (customizable in Settings). */
+  dockTools: DockTool[];
+  /** Keyboard shortcuts sheet. */
+  shortcutsOpen: boolean;
+  /** Customize Toolbar sheet. */
+  customizeOpen: boolean;
   /** Hold the pen still at the end of a stroke to snap it into a shape. */
   snapShapes: boolean;
   appearance: AppearancePref;
@@ -51,8 +71,14 @@ export interface UIState {
   toast: string | null;
 }
 
+/** In-app credits line. */
+export const CREDITS = 'Flow by Workable using Claude © 2026';
+
 const PREFS_KEY = 'flow:prefs:v1';
-const PERSISTED: (keyof UIState)[] = ['pen', 'highlighter', 'shape', 'text', 'noteTint', 'dot', 'snapDots', 'textKind', 'eraserSize', 'snapShapes', 'appearance', 'liquidGlass', 'shapeKind', 'device', 'name'];
+const PERSISTED: (keyof UIState)[] = [
+  'pen', 'highlighter', 'shape', 'text', 'noteTint', 'dot', 'snapDots', 'textKind', 'eraserSize', 'eraserMode', 'penSmoothing', 'penPressure',
+  'snapGrid', 'dockTools', 'snapShapes', 'appearance', 'liquidGlass', 'shapeKind', 'device', 'name',
+];
 
 const initial: UIState = {
   tool: 'pen',
@@ -66,6 +92,13 @@ const initial: UIState = {
   snapDots: true,
   textKind: 'text',
   eraserSize: 16,
+  eraserMode: 'object',
+  penSmoothing: 0.5,
+  penPressure: true,
+  snapGrid: false,
+  dockTools: [...DOCK_TOOLS],
+  shortcutsOpen: false,
+  customizeOpen: false,
   snapShapes: true,
   appearance: 'system',
   device: null,
@@ -88,7 +121,12 @@ function loadPrefs(): Partial<UIState> {
   }
 }
 
-let state: UIState = { ...initial, ...(typeof localStorage !== 'undefined' ? loadPrefs() : {}) };
+function sanitizePrefs(p: Partial<UIState>): Partial<UIState> {
+  if (p.dockTools && (!Array.isArray(p.dockTools) || !p.dockTools.every((t) => (DOCK_TOOLS as readonly string[]).includes(t)))) delete p.dockTools;
+  return p;
+}
+
+let state: UIState = { ...initial, ...(typeof localStorage !== 'undefined' ? sanitizePrefs(loadPrefs()) : {}) };
 const listeners = new Set<() => void>();
 let saveTimer = 0;
 

@@ -34,6 +34,10 @@ export type ColorToken =
 
 interface ElementBase {
   id: string;
+  /** Elements sharing a group id select, move and resize as one. */
+  groupId?: string;
+  /** Locked elements ignore taps, marquee and the eraser (e.g. an imported PDF page). */
+  locked?: boolean;
 }
 
 export interface StrokeElement extends ElementBase {
@@ -45,9 +49,13 @@ export interface StrokeElement extends ElementBase {
   size: number;
   /** True when pressure came from real hardware (pen), not simulated. */
   pressure: boolean;
+  /** Pen smoothing 0–1 at the time it was drawn (default 0.5). */
+  smoothing?: number;
+  /** Constant width: pressure is ignored. */
+  uniform?: boolean;
 }
 
-export type ShapeKind = 'line' | 'arrow' | 'rect' | 'ellipse' | 'triangle' | 'polygon';
+export type ShapeKind = 'line' | 'arrow' | 'rect' | 'ellipse' | 'triangle' | 'polygon' | 'callout';
 
 export interface ShapeElement extends ElementBase {
   type: 'shape';
@@ -57,7 +65,10 @@ export interface ShapeElement extends ElementBase {
   y1: number;
   x2: number;
   y2: number;
-  /** Closed polygon vertices, flat [x, y, ...]; only for kind 'polygon'. */
+  /**
+   * Extra points, flat [x, y, ...]: closed polygon vertices for kind
+   * 'polygon', the tail tip for kind 'callout'.
+   */
   pts?: number[];
   color: ColorToken;
   size: number;
@@ -72,6 +83,23 @@ export interface TextMarks {
   bold?: boolean;
   italic?: boolean;
   underline?: boolean;
+  strike?: boolean;
+  /** Monospaced inline code on a subtle fill. */
+  code?: boolean;
+  /** Highlighter-style marker behind the run. */
+  highlight?: boolean;
+  /** http(s) or mailto URL. */
+  link?: string;
+  /** Run color; overrides the element color. */
+  color?: ColorToken;
+}
+
+export type FontFamily = 'sans' | 'serif' | 'rounded' | 'mono';
+export type TextAlign = 'left' | 'center' | 'right' | 'justify';
+
+/** Paragraph formatting ('\n' separates paragraphs). */
+export interface ParaStyle {
+  list?: 'bullet' | 'number';
 }
 
 /** A run of text sharing the same marks; '\n' breaks lines. */
@@ -88,8 +116,12 @@ export interface TextElement extends ElementBase {
   text: string;
   /** Rich content; absent when the text has no formatting. */
   spans?: TextSpan[];
+  /** One entry per paragraph; absent when no paragraph has formatting. */
+  paras?: ParaStyle[];
   color: ColorToken;
   fontSize: number;
+  font?: FontFamily;
+  align?: TextAlign;
   /** Sticky-note styling: rendered on a tinted card of fixed width. */
   note?: { w: number; h: number; tint: ColorToken };
 }
@@ -102,6 +134,10 @@ export interface ImageElement extends ElementBase {
   h: number;
   /** data: URL, so documents are self-contained. */
   src: string;
+  /** Degrees clockwise about the centre. */
+  rotation?: number;
+  flipX?: boolean;
+  flipY?: boolean;
 }
 
 /** A typeset LaTeX equation, stored as vector SVG so it stays sharp at any zoom. */
@@ -116,6 +152,12 @@ export interface EquationElement extends ElementBase {
   /** Self-contained SVG (glyphs as paths) with fill="currentColor". */
   svg: string;
   color: ColorToken;
+  /** Inline (text-style) or display (block) typesetting; block when absent. */
+  mode?: 'block' | 'inline';
+  /** Degrees clockwise about the centre. */
+  rotation?: number;
+  flipX?: boolean;
+  flipY?: boolean;
 }
 
 /** A solid dot — electrons on a Bohr model, points on a graph. */

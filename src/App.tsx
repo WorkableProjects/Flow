@@ -19,6 +19,7 @@ import { PagesPanel } from './ui/PagesPanel';
 import { Timer } from './ui/Timer';
 import { ToolDock } from './ui/ToolDock';
 import { FpsMeter, frameSink } from './ui/FpsMeter';
+import { CustomizeSheet, ShortcutsSheet } from './ui/Sheets';
 import type { ControllerEvents } from './canvas/controller';
 
 export default function App({ onHome }: { onHome: () => void }) {
@@ -58,13 +59,15 @@ export default function App({ onHome }: { onHome: () => void }) {
         <TitleBar onHome={onHome} />
         <ActionsBar appearance={appearance} />
         {timer.mounted && <Timer leaving={timer.leaving} />}
-        <SelectionBar />
+        <SelectionBar appearance={appearance} />
         <ToolDock appearance={appearance} />
         <ZoomBar />
       </main>
       <PagesPanel appearance={appearance} />
       <EquationSheet appearance={appearance} />
       <ElementsSheet appearance={appearance} />
+      <ShortcutsSheet />
+      <CustomizeSheet />
       <FpsMeter />
     </GlassProvider>
   );

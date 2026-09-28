@@ -1,10 +1,12 @@
-import { strokePath } from '../engine/freehand';
+import { eraseStrokeSegment, expandGroups, gridStep, replaceWithPieces, snapTo } from '../engine/arrange';
+import { optimizePoints, strokePath } from '../engine/freehand';
 import {
   elementBounds,
   fitRect,
   hitTestPoint,
   hitTestSegment,
   inflate,
+  linkAt,
   pointInRect,
   rectFromPoints,
   rectsIntersect,
@@ -20,7 +22,7 @@ import { snapToRing } from '../engine/presets';
 import { recognize, type Recognized } from '../engine/recognize';
 import { drawBackground, drawElement, HIGHLIGHT_ALPHA, setWorldTransform } from '../engine/renderer';
 import { quantizeScale, TileCache } from '../engine/tiles';
-import type { BoardStore, Change } from '../engine/store';
+import type { BoardStore, Change, Op } from '../engine/store';
 import type { BoardTheme } from '../engine/theme';
 import type { BoardElement, Camera, Rect, ShapeElement, StrokeElement, TextElement, Vec } from '../engine/types';
 import { openEquation, toast, ui } from '../state/ui';
@@ -32,6 +34,8 @@ export interface LiveStroke {
   color: string;
   size: number;
   pressure: boolean;
+  smoothing?: number;
+  uniform?: boolean;
 }
 
 export interface LaserPoint {
@@ -59,7 +63,8 @@ export interface ControllerEvents {
 
 type Interaction =
   | { kind: 'draw'; pointerId: number; stroke: LiveStroke; minDist: number; holdAt: Vec; holdTimer: number; snapped: Recognized | null }
-  | { kind: 'erase'; pointerId: number; last: Vec; erased: Set<string> }
+  | { kind: 'erase'; pointerId: number; last: Vec; erased: Set<string>; pieces: Map<string, BoardElement[]> }
+  | { kind: 'polygon'; pts: Vec[]; cursor: Vec }
   | { kind: 'laser'; pointerId: number }
   | { kind: 'shape'; pointerId: number; start: Vec; end: Vec }
   | { kind: 'pan'; pointerId: number; start: Vec; cam: Camera }
@@ -210,6 +215,11 @@ export class CanvasController {
     return unionRects(this.store.page.elements.filter((e) => sel.has(e.id)).map(elementBounds));
   }
 
+  /** Open the inline editor on a text element (e.g. a new equation annotation). */
+  editText(element: TextElement, isNew: boolean) {
+    this.events.onEditText?.({ element, isNew });
+  }
+
   /** Receive viewer-side presence from the tutor window. */
   setRemotePresence(p: { laser?: LaserPoint[]; live?: LiveStroke | null }) {
     if (p.laser) this.remoteLaser = p.laser;
@@ -224,6 +234,7 @@ export class CanvasController {
     if (it?.kind === 'draw') clearTimeout(it.holdTimer);
     this.interaction = null;
     if (it && (it.kind === 'move' || it.kind === 'scale' || it.kind === 'erase')) this.updateHidden(new Set());
+    if (it?.kind === 'polygon') this.commitPolygon(it);
     this.events.onPresence?.({ live: null });
     this.invalidate();
   }
@@ -233,24 +244,10 @@ export class CanvasController {
   private onStoreChange = (c: Change) => {
     if (c.type === 'op') {
       const page = this.store.page;
-      const op = c.op;
-      if (op.kind === 'elements') {
-        if (op.pageId !== page.id) return;
-        if (c.appendOnly) {
-          // Fast path: new ink is painted straight into the cached tiles.
-          const els = op.added.map((a) => a.el);
-          this.tiles.append(els, this.tileKey());
-          if (this.sceneChanges !== 'all') this.sceneChanges.push(...els.map(elementBounds));
-          this.sceneDirty = true;
-        } else if (op.removed.length + op.added.length > 400) {
-          this.invalidateAll(true);
-        } else {
-          for (const p of [...op.removed, ...op.added]) this.invalidateRect(elementBounds(p.el));
-        }
-      } else {
-        // Page structure / paper / title: tiles only depend on elements.
-        this.invalidateAll(op.kind === 'page');
-      }
+      const flat: Op[] = [];
+      const collect = (o: Op) => (o.kind === 'batch' ? o.ops.forEach(collect) : flat.push(o));
+      collect(c.op);
+      for (const op of flat) this.applyChange(op, c.appendOnly && flat.length === 1);
       // Drop selection entries that no longer exist.
       const sel = ui.get().selection;
       if (sel.size) {
@@ -275,6 +272,29 @@ export class CanvasController {
     }
     this.schedule();
   };
+
+  private applyChange(op: Op, appendOnly: boolean) {
+    {
+      const page = this.store.page;
+      if (op.kind === 'elements') {
+        if (op.pageId !== page.id) return;
+        if (appendOnly) {
+          // Fast path: new ink is painted straight into the cached tiles.
+          const els = op.added.map((a) => a.el);
+          this.tiles.append(els, this.tileKey());
+          if (this.sceneChanges !== 'all') this.sceneChanges.push(...els.map(elementBounds));
+          this.sceneDirty = true;
+        } else if (op.removed.length + op.added.length > 400) {
+          this.invalidateAll(true);
+        } else {
+          for (const p of [...op.removed, ...op.added]) this.invalidateRect(elementBounds(p.el));
+        }
+      } else if (op.kind !== 'title') {
+        // Page structure / paper: tiles only depend on elements.
+        this.invalidateAll(op.kind === 'page' || op.kind === 'movePage');
+      }
+    }
+  }
 
   // ─── Sizing & frame loop ────────────────────────────────────────────
 
@@ -390,6 +410,11 @@ export class CanvasController {
     }
     if (this.remoteLive) this.drawLiveStroke(ctx, this.remoteLive);
     if (it?.kind === 'shape') this.drawShapePreview(ctx, this.shapeFromDrag(it.start, it.end));
+    if (it?.kind === 'erase' && it.pieces.size) {
+      for (const pieces of it.pieces.values()) for (const el of pieces) drawElement(ctx, el, this.theme);
+      this.markLive(unionRects([...it.pieces.values()].flat().map(elementBounds)), 8);
+    }
+    if (it?.kind === 'polygon') this.drawPolygonPreview(ctx, it);
     if (it?.kind === 'move' || it?.kind === 'scale') {
       for (const el of it.moved) drawElement(ctx, el, this.theme);
       this.markLive(unionRects(it.moved.map(elementBounds)), 12);
@@ -457,7 +482,7 @@ export class CanvasController {
       if (p[i + 1] < y0) y0 = p[i + 1]; if (p[i + 1] > y1) y1 = p[i + 1];
     }
     this.markLive(inflate({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, s.size));
-    const path = strokePath(s.points, s.tool, s.size, s.pressure, false);
+    const path = strokePath(s.points, s.tool, s.size, s.pressure, false, s);
     ctx.fillStyle = this.theme.resolve(s.color);
     if (s.tool === 'highlighter') {
       ctx.globalAlpha = HIGHLIGHT_ALPHA;
@@ -547,10 +572,18 @@ export class CanvasController {
 
   // ─── Element factories ─────────────────────────────────────────────
 
-  private shapeFromDrag(a: Vec, b: Vec): ShapeElement {
+  /** Snap a world point to the page grid when Snap to Grid is on. */
+  private snap(p: Vec): Vec {
+    if (!ui.get().snapGrid) return p;
+    const step = gridStep(this.store.page.background);
+    return { x: snapTo(p.x, step), y: snapTo(p.y, step) };
+  }
+
+  private shapeFromDrag(a0: Vec, b0: Vec): ShapeElement {
     const st = ui.get().shape;
     const kind = ui.get().shapeKind;
-    let { x: x2, y: y2 } = b;
+    const a = this.snap(a0);
+    let { x: x2, y: y2 } = this.snap(b0);
     if (this.shiftDown) {
       const dx = x2 - a.x, dy = y2 - a.y;
       if (kind === 'line' || kind === 'arrow') {
@@ -564,7 +597,67 @@ export class CanvasController {
         y2 = a.y + Math.sign(dy || 1) * s;
       }
     }
-    return { id: uid(), type: 'shape', kind, x1: a.x, y1: a.y, x2, y2, color: st.color, size: st.size / this.camera.z, fill: st.fill };
+    return { id: uid(), type: 'shape', kind: kind === 'polygon' ? 'rect' : kind, x1: a.x, y1: a.y, x2, y2, color: st.color, size: st.size / this.camera.z, fill: st.fill };
+  }
+
+  private polygonElement(pts: Vec[]): ShapeElement {
+    const st = ui.get().shape;
+    const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+    return {
+      id: uid(), type: 'shape', kind: 'polygon',
+      x1: Math.min(...xs), y1: Math.min(...ys), x2: Math.max(...xs), y2: Math.max(...ys),
+      pts: pts.flatMap((p) => [p.x, p.y]),
+      color: st.color, size: st.size / this.camera.z, fill: st.fill,
+    };
+  }
+
+  private drawPolygonPreview(ctx: CanvasRenderingContext2D, it: Extract<Interaction, { kind: 'polygon' }>) {
+    const st = ui.get().shape;
+    const pts = [...it.pts, it.cursor];
+    const color = this.theme.resolve(st.color);
+    ctx.save();
+    ctx.lineWidth = st.size / this.camera.z;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = color;
+    ctx.beginPath();
+    pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    ctx.stroke();
+    // Closing edge (dashed) and the first vertex as a target.
+    ctx.setLineDash([6 / this.camera.z, 6 / this.camera.z]);
+    ctx.globalAlpha = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(it.cursor.x, it.cursor.y);
+    ctx.lineTo(it.pts[0].x, it.pts[0].y);
+    ctx.stroke();
+    ctx.restore();
+    const r = 6 / this.camera.z;
+    ctx.beginPath();
+    ctx.arc(it.pts[0].x, it.pts[0].y, r, 0, Math.PI * 2);
+    ctx.fillStyle = this.theme.selection;
+    ctx.fill();
+    const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+    this.markLive({ x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) }, 16);
+  }
+
+  /** Finish a polygon (3+ vertices), or drop it. */
+  private commitPolygon(it: Extract<Interaction, { kind: 'polygon' }>) {
+    if (this.interaction === it) this.interaction = null;
+    if (it.pts.length >= 3) this.store.addElements([this.polygonElement(it.pts)]);
+    this.liveDirty = true;
+    this.schedule();
+  }
+
+  /** Enter / Escape while drawing a polygon: finish or cancel it. */
+  finishPolygon(commit: boolean) {
+    const it = this.interaction;
+    if (it?.kind !== 'polygon') return false;
+    if (commit) this.commitPolygon(it);
+    else {
+      this.interaction = null;
+      this.invalidate();
+    }
+    return true;
   }
 
   private shapeFromRecognized(r: Recognized, s: LiveStroke): ShapeElement {
@@ -584,7 +677,7 @@ export class CanvasController {
     el.addEventListener('pointerleave', this.onPointerLeave);
     el.addEventListener('wheel', this.onWheel, { passive: false });
     el.addEventListener('dblclick', this.onDoubleClick);
-    el.addEventListener('contextmenu', (e) => e.preventDefault());
+    el.addEventListener('contextmenu', this.preventDefault);
     window.addEventListener('keydown', this.onKey);
     window.addEventListener('keyup', this.onKey);
     window.addEventListener('blur', this.onBlur);
@@ -602,6 +695,9 @@ export class CanvasController {
     el.removeEventListener('pointerleave', this.onPointerLeave);
     el.removeEventListener('wheel', this.onWheel);
     el.removeEventListener('dblclick', this.onDoubleClick);
+    el.removeEventListener('contextmenu', this.preventDefault);
+    el.removeEventListener('gesturestart', this.preventDefault as EventListener);
+    el.removeEventListener('gesturechange', this.preventDefault as EventListener);
     window.removeEventListener('keydown', this.onKey);
     window.removeEventListener('keyup', this.onKey);
     window.removeEventListener('blur', this.onBlur);
@@ -630,6 +726,11 @@ export class CanvasController {
     if (this.interaction?.kind === 'shape') {
       this.liveDirty = true;
       this.schedule();
+    }
+    if (this.interaction?.kind === 'polygon' && e.type === 'keydown' && !typing && (e.key === 'Enter' || e.key === 'Escape')) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      this.finishPolygon(e.key === 'Enter');
     }
   };
 
@@ -681,9 +782,13 @@ export class CanvasController {
       };
       return;
     }
+    const tool = ui.get().tool;
+    if (this.interaction?.kind === 'polygon' && tool === 'shape' && ui.get().shapeKind === 'polygon' && !this.spaceDown && e.button === 0) {
+      this.addPolygonVertex(p);
+      return;
+    }
     if (this.interaction) return;
 
-    const tool = ui.get().tool;
     const world = screenToWorld(this.camera, p.x, p.y);
     const wantsPan =
       this.readOnly || this.spaceDown || tool === 'hand' || e.button === 1 || e.button === 2 ||
@@ -699,16 +804,20 @@ export class CanvasController {
     switch (tool) {
       case 'pen':
       case 'highlighter': {
-        const style = ui.get()[tool];
-        const pressure = e.pointerType === 'pen';
+        const st = ui.get();
+        const style = st[tool];
+        const uniform = tool === 'pen' && !st.penPressure;
+        const pressure = e.pointerType === 'pen' && !uniform;
         const size = style.size / this.camera.z;
         const stroke: LiveStroke = { tool, points: [world.x, world.y, pressure ? e.pressure || 0.5 : 0.5], color: style.color, size, pressure };
+        if (tool === 'pen' && Math.abs(st.penSmoothing - 0.5) > 0.001) stroke.smoothing = st.penSmoothing;
+        if (uniform) stroke.uniform = true;
         this.interaction = { kind: 'draw', pointerId: e.pointerId, stroke, minDist: 0.6 / this.camera.z, holdAt: p, holdTimer: 0, snapped: null };
         this.armHold();
         break;
       }
       case 'eraser': {
-        this.interaction = { kind: 'erase', pointerId: e.pointerId, last: world, erased: new Set() };
+        this.interaction = { kind: 'erase', pointerId: e.pointerId, last: world, erased: new Set(), pieces: new Map() };
         this.eraseAlong(world, world);
         break;
       }
@@ -717,17 +826,26 @@ export class CanvasController {
         this.laser.push({ ...world, t: Date.now() });
         break;
       case 'shape':
-        this.interaction = { kind: 'shape', pointerId: e.pointerId, start: world, end: world };
+        if (ui.get().shapeKind === 'polygon') {
+          const v = this.snap(world);
+          this.interaction = { kind: 'polygon', pts: [v], cursor: v };
+          ui.set({ toast: null });
+        } else this.interaction = { kind: 'shape', pointerId: e.pointerId, start: world, end: world };
         break;
       case 'text':
       case 'note': {
         // A tap that ends an edit only ends the edit (Apple Notes behaviour).
         if (wasEditing) break;
         const hit = this.hitTop(world, 4 / this.camera.z);
+        const at = this.snap(world);
         if (hit?.type === 'text') {
           this.events.onEditText?.({ element: hit, isNew: false });
         } else if (tool === 'note') {
           const w = 220 / this.camera.z;
+          if (ui.get().snapGrid) {
+            world.x = at.x + w / 2;
+            world.y = at.y + w / 2;
+          }
           const st = ui.get();
           this.events.onEditText?.({
             isNew: true,
@@ -738,7 +856,7 @@ export class CanvasController {
           const fontSize = st.size / this.camera.z;
           this.events.onEditText?.({
             isNew: true,
-            element: { id: uid(), type: 'text', x: world.x, y: world.y - fontSize * 0.65, text: '', color: st.color, fontSize },
+            element: { id: uid(), type: 'text', x: ui.get().snapGrid ? at.x : world.x, y: ui.get().snapGrid ? at.y : world.y - fontSize * 0.65, text: '', color: st.color, fontSize },
           });
         }
         break;
@@ -774,14 +892,23 @@ export class CanvasController {
       }
     }
     const hit = this.hitTop(world, 6 / this.camera.z);
+    // ⌘-click follows a link in text.
+    if (hit?.type === 'text' && (e.metaKey || e.ctrlKey)) {
+      const href = linkAt(hit, world);
+      if (href) {
+        window.open(href, '_blank', 'noopener');
+        return;
+      }
+    }
     let next = sel;
     if (hit) {
+      const unit = expandGroups(page.elements, [hit.id]);
       if (e.shiftKey) {
         const toggled = new Set(sel);
-        if (toggled.has(hit.id)) toggled.delete(hit.id);
-        else toggled.add(hit.id);
+        const on = toggled.has(hit.id);
+        for (const id of unit) on ? toggled.delete(id) : toggled.add(id);
         next = toggled;
-      } else if (!sel.has(hit.id)) next = new Set([hit.id]);
+      } else if (!sel.has(hit.id)) next = unit;
     } else if (bounds && pointInRect(world, inflate(bounds, 6 / this.camera.z)) && !e.shiftKey) {
       // Dragging inside the selection box moves it.
     } else {
@@ -790,10 +917,28 @@ export class CanvasController {
       return;
     }
     if (next !== sel) ui.set({ selection: next });
-    const originals = page.elements.filter((el) => next.has(el.id));
+    const originals = page.elements.filter((el) => next.has(el.id) && !el.locked);
     if (originals.length) {
       this.interaction = { kind: 'move', pointerId: e.pointerId, start: world, originals, moved: originals, dragged: false };
     }
+  }
+
+  private addPolygonVertex(p: Vec) {
+    const it = this.interaction;
+    if (it?.kind !== 'polygon') return;
+    const v = this.snap(screenToWorld(this.camera, p.x, p.y));
+    const first = worldToScreen(this.camera, it.pts[0].x, it.pts[0].y);
+    const last = worldToScreen(this.camera, it.pts[it.pts.length - 1].x, it.pts[it.pts.length - 1].y);
+    // Tap the first vertex, or tap twice in place, to close the shape.
+    if (it.pts.length >= 3 && (Math.hypot(p.x - first.x, p.y - first.y) < 14 || Math.hypot(p.x - last.x, p.y - last.y) < 6)) {
+      this.commitPolygon(it);
+      return;
+    }
+    if (Math.hypot(p.x - last.x, p.y - last.y) < 6) return;
+    it.pts.push(v);
+    it.cursor = v;
+    this.liveDirty = true;
+    this.schedule();
   }
 
   /** World position for a dot placed at screen point `p`. */
@@ -803,9 +948,9 @@ export class CanvasController {
     return snapToRing(this.store.page.elements, world, 16 / this.camera.z);
   }
 
-  private hitTop(world: Vec, r: number): BoardElement | null {
+  private hitTop(world: Vec, r: number, includeLocked = false): BoardElement | null {
     const els = this.store.page.elements;
-    for (let i = els.length - 1; i >= 0; i--) if (hitTestPoint(els[i], world, r)) return els[i];
+    for (let i = els.length - 1; i >= 0; i--) if ((includeLocked || !els[i].locked) && hitTestPoint(els[i], world, r)) return els[i];
     return null;
   }
 
@@ -845,6 +990,12 @@ export class CanvasController {
     const it = this.interaction;
     const tool = ui.get().tool;
 
+    if (it?.kind === 'polygon') {
+      it.cursor = this.snap(screenToWorld(this.camera, p.x, p.y));
+      this.liveDirty = true;
+      this.schedule();
+      return;
+    }
     if (!it) {
       if (tool === 'eraser' || tool === 'laser' || tool === 'dot') {
         this.liveDirty = true;
@@ -917,7 +1068,15 @@ export class CanvasController {
           it.dragged = true;
           this.setHidden(it.originals.map((o) => o.id));
         }
-        it.moved = it.originals.map((o) => translateElement(o, dx, dy));
+        let sdx = dx, sdy = dy;
+        if (ui.get().snapGrid) {
+          // Snap the selection's top-left corner to the grid.
+          const b = unionRects(it.originals.map(elementBounds))!;
+          const step = gridStep(this.store.page.background);
+          sdx = snapTo(b.x + dx, step) - b.x;
+          sdy = snapTo(b.y + dy, step) - b.y;
+        }
+        it.moved = it.originals.map((o) => translateElement(o, sdx, sdy));
         break;
       }
       case 'scale': {
@@ -938,8 +1097,30 @@ export class CanvasController {
     const it = this.interaction;
     if (it?.kind !== 'erase') return;
     const r = ui.get().eraserSize / 2 / this.camera.z;
+    const segment = ui.get().eraserMode === 'segment';
     let changed = false;
     for (const el of this.store.page.elements) {
+      if (el.locked) continue;
+      if (segment && el.type === 'stroke') {
+        // Partial erase: cut the touched part out, keep the rest as pieces.
+        const current = it.pieces.get(el.id) ?? [el];
+        let touched = false;
+        const next: BoardElement[] = [];
+        for (const piece of current) {
+          const cut = piece.type === 'stroke' ? eraseStrokeSegment(piece, a.x, a.y, b.x, b.y, r) : null;
+          if (cut) touched = true;
+          next.push(...(cut ?? [piece]));
+        }
+        if (touched) {
+          it.pieces.set(el.id, next);
+          if (!it.erased.has(el.id)) {
+            it.erased.add(el.id);
+            changed = true;
+          }
+          this.liveDirty = true;
+        }
+        continue;
+      }
       if (it.erased.has(el.id)) continue;
       if (hitTestSegment(el, a.x, a.y, b.x, b.y, r)) {
         it.erased.add(el.id);
@@ -957,6 +1138,7 @@ export class CanvasController {
       if (this.pointers.size < 2) this.interaction = null;
       return;
     }
+    if (it.kind === 'polygon') return;
     if (it.pointerId !== e.pointerId) return;
     this.interaction = null;
 
@@ -968,15 +1150,23 @@ export class CanvasController {
           this.store.addElements([this.shapeFromRecognized(it.snapped, s)]);
           toast('Shape snapped');
         } else {
-          this.store.addElements([{ id: uid(), type: 'stroke', tool: s.tool, points: s.points, color: s.color, size: s.size, pressure: s.pressure }]);
+          const el: StrokeElement = { id: uid(), type: 'stroke', tool: s.tool, points: this.optimize(s), color: s.color, size: s.size, pressure: s.pressure };
+          if (s.smoothing !== undefined) el.smoothing = s.smoothing;
+          if (s.uniform) el.uniform = true;
+          this.store.addElements([el]);
         }
         this.events.onPresence?.({ live: null });
         break;
       }
-      case 'erase':
-        if (it.erased.size) this.store.removeElements(it.erased);
+      case 'erase': {
+        if (it.pieces.size) {
+          const pieces = new Map<string, BoardElement[]>();
+          for (const id of it.erased) pieces.set(id, it.pieces.get(id) ?? []);
+          this.store.commit(replaceWithPieces(this.store.page.id, this.store.page.elements, pieces));
+        } else if (it.erased.size) this.store.removeElements(it.erased);
         this.updateHidden(new Set());
         break;
+      }
       case 'shape': {
         const el = this.shapeFromDrag(it.start, it.end);
         const b = elementBounds(el);
@@ -992,9 +1182,9 @@ export class CanvasController {
         const r = rectFromPoints(it.start.x, it.start.y, it.end.x, it.end.y);
         const ids = new Set(it.additive ? ui.get().selection : []);
         if (r.w > 0 || r.h > 0) {
-          for (const el of this.store.page.elements) if (rectsIntersect(elementBounds(el), r)) ids.add(el.id);
+          for (const el of this.store.page.elements) if (!el.locked && rectsIntersect(elementBounds(el), r)) ids.add(el.id);
         }
-        ui.set({ selection: ids });
+        ui.set({ selection: expandGroups(this.store.page.elements, ids) });
         break;
       }
       case 'pan':
@@ -1045,5 +1235,25 @@ export class CanvasController {
     const hit = this.hitTop(world, 4 / this.camera.z);
     if (hit?.type === 'text') this.events.onEditText?.({ element: hit, isNew: false });
     else if (hit?.type === 'equation') openEquation(hit.id);
+    else if (hit?.groupId) {
+      // Double-click into a group selects just that member.
+      ui.set({ selection: new Set([hit.id]) });
+      this.invalidate();
+    } else if (!hit) {
+      // Locked elements can still be selected deliberately (to unlock them).
+      const locked = this.hitTop(world, 4 / this.camera.z, true);
+      if (locked) ui.set({ selection: new Set([locked.id]) });
+    }
   };
+
+  /**
+   * Vector stroke optimization: pressure-true and constant-width strokes
+   * drop samples that don't change their shape; all strokes are rounded.
+   * (Simulated pressure depends on sample spacing, so those keep every sample.)
+   */
+  private optimize(s: LiveStroke): number[] {
+    const tol = 0.15 / this.camera.z;
+    if (s.pressure || s.uniform || s.tool === 'highlighter') return optimizePoints(s.points, tol);
+    return s.points.map((v, i) => (i % 3 === 2 ? Math.round(v * 1000) / 1000 : Math.round(v * 100) / 100));
+  }
 }

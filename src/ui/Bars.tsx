@@ -4,9 +4,22 @@ import { Icon, type IconName } from '../icons/Icon';
 import type { Appearance } from '../engine/theme';
 import type { Background } from '../engine/types';
 import {
+  alignSelection,
+  annotateEquation,
+  copyMathML,
   copyPng,
+  copyShareLink,
   deleteSelection,
+  exportPdf,
+  exportSvg,
+  pickPdf,
+  distributeSelection,
   duplicateSelection,
+  flipSelection,
+  groupSelection,
+  rotateSelection,
+  setLocked,
+  ungroupSelection,
   exportPng,
   goToPage,
   newDocument,
@@ -18,10 +31,13 @@ import {
   undo,
 } from '../state/actions';
 import { board, useBoard } from '../state/board';
-import { openElements, openEquation, setTool, ui, useUI, type AppearancePref, type DevicePref } from '../state/ui';
-import { markIsOn, setMark, spansOf, withSpans } from '../engine/richtext';
-import type { EquationElement, TextElement } from '../engine/types';
-import { FormatButtons, FORMATS, type FormatSpec, type MarkState } from './FormatBar';
+import { CREDITS, openElements, openEquation, ui, useUI, type AppearancePref, type DevicePref } from '../state/ui';
+
+declare const __APP_VERSION__: string;
+import { markIsOn, parasOf, setMark, spansOf, withSpans } from '../engine/richtext';
+import { selectionUnits } from '../engine/arrange';
+import type { ColorToken, EquationElement, TextElement } from '../engine/types';
+import { ColorButton, FormatButtons, FORMATS, TextStyleButton, type FormatSpec, type MarkState, type TextStyleState } from './FormatBar';
 import { channelSupported } from '../engine/sync';
 import { BubbleGroup } from './Bubble';
 import { Divider, Segmented, Toggle, ToolButton } from './controls';
@@ -147,13 +163,13 @@ export function ActionsBar({ appearance }: { appearance: Appearance }) {
       <div className="flex items-center gap-0.5 p-1.5">
         <ToolButton icon="undo" label="Undo" shortcut="⌘Z" disabled={!canUndo} onClick={undo} />
         <ToolButton icon="redo" label="Redo" shortcut="⇧⌘Z" disabled={!canRedo} onClick={redo} />
-        <Divider />
+        <span className="max-sm:hidden"><Divider /></span>
         <ToolButton ref={paperRef} icon={BACKGROUNDS.find((b) => b.value === background)?.icon ?? 'bgDots'} label="Paper" active={menu === 'paper'} onClick={() => toggle('paper')} className="max-sm:hidden" />
         {channelSupported() && <ToolButton icon="present" label="Student view" onClick={openPresenter} className="max-md:hidden mobile:hidden" />}
         <ToolButton ref={appsRef} icon="apps" label="Apps" iconSize={19} active={menu === 'apps'} onClick={() => toggle('apps')}>
           {(timerOpen || curtain) && menu !== 'apps' && <span aria-hidden className="absolute top-2 right-2 h-2 w-2 rounded-full bg-tint shadow-[0_0_0_2px_var(--bg)]" />}
         </ToolButton>
-        <Divider />
+        <span className="max-sm:hidden"><Divider /></span>
         <ToolButton ref={shareRef} icon="share" label="Share & export" active={menu === 'share'} onClick={() => toggle('share')} />
         <ToolButton ref={settingsRef} icon="settings" label="Settings" active={menu === 'settings'} onClick={() => toggle('settings')} />
       </div>
@@ -164,8 +180,7 @@ export function ActionsBar({ appearance }: { appearance: Appearance }) {
           <AppTile icon="timer" color="#FF9500" label="Timer" detail={timerOpen ? 'On' : 'Countdown'} on={timerOpen} onClick={() => ui.set({ timerOpen: !timerOpen })} />
           <AppTile icon="curtain" color="#5856D6" label="Screen Hider" detail={curtain ? 'On' : 'Reveal steps'} on={curtain} shortcut="C" onClick={() => ui.set({ curtain: { ...ui.get().curtain, on: !curtain } })} />
           <AppTile icon="equation" color="var(--brand)" label="LaTeX Equation" detail="Typeset math" onClick={() => { close(); openEquation(); }} />
-          <AppTile icon="atom" color="#34C759" label="Elements" detail="Bohr model & more" onClick={() => { close(); openElements(); }} />
-          <AppTile icon="textBox" color="#007AFF" label="Text" detail="Rich text & notes" shortcut="T" onClick={() => { close(); setTool(ui.get().textKind); }} />
+          <AppTile icon="atom" color="#34C759" label="Elements" detail="Bohr, orbitals & more" onClick={() => { close(); openElements(); }} />
         </div>
       </Popover>
 
@@ -186,13 +201,26 @@ export function ActionsBar({ appearance }: { appearance: Appearance }) {
             </button>
           ))}
         </BubbleGroup>
+        <div className="mt-2 flex min-h-11 items-center justify-between gap-3 border-t border-hairline px-2 pt-2">
+          <div>
+            <p className="text-subhead text-label">Snap to grid</p>
+            <p className="text-footnote text-label-2">Moves and new shapes align · ⌘'</p>
+          </div>
+          <Toggle checked={s.snapGrid} onChange={(v) => ui.set({ snapGrid: v })} label="Snap to grid" />
+        </div>
       </Popover>
 
       <Popover open={menu === 'share'} onClose={close} anchor={shareRef} placement="bottom" label="Share and export" className="w-[280px] p-1.5">
-        <MenuItem icon="image" label="Export page as PNG" onClick={() => { close(); exportPng(appearance); }} />
-        <MenuItem icon="duplicate" label="Copy page image" onClick={() => { close(); copyPng(appearance); }} />
+        <MenuItem icon="link" label="Copy read-only link" onClick={() => { close(); copyShareLink(); }} />
         <MenuItem icon="present" label="Open student view" onClick={() => { close(); openPresenter(); }} />
         <div className="mx-3 my-1 h-px bg-hairline" />
+        <p className="px-3 pt-1 pb-0.5 text-footnote font-semibold tracking-wide text-label-2 uppercase">Export</p>
+        <MenuItem icon="image" label="Page as PNG" onClick={() => { close(); exportPng(appearance); }} />
+        <MenuItem icon="photoStack" label="Page as SVG" hint="Vector" onClick={() => { close(); exportSvg(appearance); }} />
+        <MenuItem icon="exportFile" label="Lesson as PDF" hint="All pages" onClick={() => { close(); exportPdf(appearance); }} />
+        <MenuItem icon="duplicate" label="Copy page image" onClick={() => { close(); copyPng(appearance); }} />
+        <div className="mx-3 my-1 h-px bg-hairline" />
+        <MenuItem icon="importFile" label="Import PDF…" onClick={() => { close(); pickPdf(); }} />
         <MenuItem icon="open" label="Save lesson (.flow)" hint="⌘S" onClick={() => { close(); saveDocument(); }} />
         <MenuItem icon="share" label="Open lesson…" hint="⌘O" onClick={() => { close(); openDocument(); }} />
         <MenuItem icon="plus" label="New lesson" onClick={() => { close(); newDocument(); }} />
@@ -236,31 +264,11 @@ export function ActionsBar({ appearance }: { appearance: Appearance }) {
             { value: 'desktop', label: <span className="flex items-center gap-1.5"><Icon name="desktop" size={15} />Desktop</span> },
           ]}
         />
-        <div className="mt-3 border-t border-hairline pt-3 mobile:hidden">
-          <p className="mb-2 text-footnote font-semibold tracking-wide text-label-2 uppercase">Shortcuts</p>
-          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-footnote">
-            {[
-              ['V · H', 'Select · Pan'],
-              ['P · M · E', 'Pen · Highlighter · Eraser'],
-              ['L', 'Laser pointer'],
-              ['D', 'Dot (snaps to rings)'],
-              ['S · R · O · A', 'Shapes · Rect · Ellipse · Arrow'],
-              ['T · N · I', 'Text · Sticky note · Image'],
-              ['⌘B · ⌘I · ⌘U', 'Bold · Italic · Underline'],
-              ['Space + drag', 'Pan'],
-              ['⌘ + scroll / pinch', 'Zoom'],
-              ['⌘0 · ⌘1', 'Actual size · Fit'],
-              ['⌘D · ⌫', 'Duplicate · Delete'],
-              ['C', 'Screen Hider'],
-              ['PgUp · PgDn', 'Previous · Next page'],
-            ].map(([k, v]) => (
-              <div key={k} className="contents">
-                <dt className="font-semibold text-label tabular-nums">{k}</dt>
-                <dd className="text-label-2">{v}</dd>
-              </div>
-            ))}
-          </dl>
+        <div className="mt-3 border-t border-hairline pt-2">
+          <MenuItem icon="customize" label="Customize Toolbar…" onClick={() => { close(); ui.set({ customizeOpen: true }); }} />
+          <span className="mobile:hidden"><MenuItem icon="keyboard" label="Keyboard Shortcuts" hint="?" onClick={() => { close(); ui.set({ shortcutsOpen: true }); }} /></span>
         </div>
+        <p className="mt-2 text-center text-caption text-label-3">{CREDITS} · {__APP_VERSION__}</p>
       </Popover>
     </Glass>
   );
@@ -291,7 +299,70 @@ export function ZoomBar() {
 
 // ─── Contextual selection actions ────────────────────────────────────
 
-export function SelectionBar() {
+function ArrangeButton({ count, grouped, locked, tab }: { count: number; grouped: boolean; locked: boolean; tab: number }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLButtonElement>(null);
+  const units = useUI((s) => selectionUnits(board.page.elements, s.selection).length);
+  const snap = useUI((s) => s.snapGrid);
+  const Btn = ({ icon, label, shortcut, onClick, disabled }: { icon: IconName; label: string; shortcut?: string; onClick: () => void; disabled?: boolean }) => (
+    <ToolButton icon={icon} iconSize={18} label={label} shortcut={shortcut} disabled={disabled} onClick={onClick} className="flex-1" />
+  );
+  return (
+    <>
+      <ToolButton ref={ref} icon="layers" iconSize={19} label="Arrange" active={open} tabIndex={tab} onClick={() => setOpen((v) => !v)} />
+      <Popover open={open} onClose={() => setOpen(false)} anchor={ref} placement="top" label="Arrange" className="w-[320px] max-w-[calc(100vw-24px)] p-3">
+        <p className="mb-1.5 px-1 text-footnote font-semibold tracking-wide text-label-2 uppercase">Layer</p>
+        <div className="flex rounded-[14px] bg-fill p-0.5">
+          <Btn icon="front" label="Bring to front" shortcut="⇧]" onClick={() => reorderSelection('front')} />
+          <Btn icon="forward" label="Bring forward" shortcut="]" onClick={() => reorderSelection('forward')} />
+          <Btn icon="backward" label="Send backward" shortcut="[" onClick={() => reorderSelection('backward')} />
+          <Btn icon="back" label="Send to back" shortcut="⇧[" onClick={() => reorderSelection('back')} />
+        </div>
+        <p className="mt-3 mb-1.5 px-1 text-footnote font-semibold tracking-wide text-label-2 uppercase">Align{units < 2 ? ' · select 2 or more' : ''}</p>
+        <div className="flex rounded-[14px] bg-fill p-0.5">
+          <Btn icon="alignObjLeft" label="Align left edges" disabled={units < 2} onClick={() => alignSelection('left')} />
+          <Btn icon="alignObjCenter" label="Align centers" disabled={units < 2} onClick={() => alignSelection('center')} />
+          <Btn icon="alignObjRight" label="Align right edges" disabled={units < 2} onClick={() => alignSelection('right')} />
+          <Btn icon="alignObjTop" label="Align top edges" disabled={units < 2} onClick={() => alignSelection('top')} />
+          <Btn icon="alignObjMiddle" label="Align middles" disabled={units < 2} onClick={() => alignSelection('middle')} />
+          <Btn icon="alignObjBottom" label="Align bottom edges" disabled={units < 2} onClick={() => alignSelection('bottom')} />
+        </div>
+        <div className="mt-1.5 flex gap-1.5">
+          <div className="flex flex-1 rounded-[14px] bg-fill p-0.5">
+            <Btn icon="distributeH" label="Distribute horizontally" disabled={units < 3} onClick={() => distributeSelection('x')} />
+            <Btn icon="distributeV" label="Distribute vertically" disabled={units < 3} onClick={() => distributeSelection('y')} />
+          </div>
+          <div className="flex flex-1 rounded-[14px] bg-fill p-0.5">
+            <Btn icon="group" label="Group" shortcut="⌘G" disabled={count < 2 || (grouped && units < 2)} onClick={groupSelection} />
+            <Btn icon="ungroup" label="Ungroup" shortcut="⇧⌘G" disabled={!grouped} onClick={ungroupSelection} />
+          </div>
+        </div>
+        <div className="mt-3 flex min-h-11 items-center justify-between gap-3 border-t border-hairline pt-2">
+          <span className="text-subhead text-label">Snap to grid</span>
+          <Toggle checked={snap} onChange={(v) => ui.set({ snapGrid: v })} label="Snap to grid" />
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            setOpen(false);
+            setLocked(!locked);
+          }}
+          className="spring mt-1 flex h-11 w-full items-center justify-center gap-2 rounded-full bg-fill text-subhead font-semibold text-label hover:bg-fill-2 active:scale-[0.98]"
+        >
+          <Icon name={locked ? 'unlock' : 'lock'} size={16} /> {locked ? 'Unlock' : 'Lock'}
+        </button>
+      </Popover>
+    </>
+  );
+}
+
+/** Style state of the selected text elements (the first one leads). */
+function textStyleOf(texts: TextElement[]): TextStyleState {
+  const t = texts[0];
+  return { font: t.font ?? 'sans', fontSize: t.fontSize, align: t.align ?? 'left', wraps: texts.every((x) => !!x.note) };
+}
+
+export function SelectionBar({ appearance }: { appearance: Appearance }) {
   const selection = useUI((s) => s.selection);
   const tool = useUI((s) => s.tool);
   const elements = useBoard((b) => b.page.elements);
@@ -299,28 +370,61 @@ export function SelectionBar() {
   const visible = count > 0 && tool === 'select';
   const tab = visible ? 0 : -1;
 
-  // Contextual actions: formatting for text, re-editing for an equation.
+  // Contextual actions: formatting for text, re-editing and transforms for equations.
   const selected = elements.filter((e) => selection.has(e.id));
   const texts = selected.filter((e): e is TextElement => e.type === 'text');
   const allText = texts.length > 0 && texts.length === selected.length;
   const equation = selected.length === 1 && selected[0].type === 'equation' ? (selected[0] as EquationElement) : null;
+  const boxedOnly = selected.length > 0 && selected.every((e) => e.type === 'equation' || e.type === 'image');
+  const grouped = selected.some((e) => e.groupId);
+  const locked = selected.some((e) => e.locked);
+  const link = texts.length === 1 ? spansOf(texts[0]).find((s) => s.marks?.link)?.marks?.link : undefined;
+
   const marks: MarkState = {};
-  if (allText) for (const f of FORMATS) marks[f.mark] = texts.every((t) => markIsOn(spansOf(t), f.mark));
+  if (allText) {
+    for (const f of FORMATS) marks[f.mark] = texts.every((t) => markIsOn(spansOf(t), f.mark));
+    const lists = texts.flatMap((t) => parasOf(t).map((p) => p.list));
+    marks.list = lists.every((l) => l && l === lists[0]) ? lists[0] : undefined;
+  }
   const toggle = (f: FormatSpec) => board.replaceElements(texts.map((t) => withSpans(t, setMark(spansOf(t), f.mark, !marks[f.mark]))));
+  const setColor = (c: ColorToken) => board.replaceElements(texts.map((t) => withSpans({ ...t, color: c }, setMark(spansOf(t), 'color', undefined))));
+  const setStyle = (patch: Partial<Omit<TextStyleState, 'wraps'>>) => {
+    const lead = texts[0];
+    board.replaceElements(
+      texts.map((t) => {
+        const next: TextElement = { ...t };
+        if (patch.font) {
+          if (patch.font === 'sans') delete next.font;
+          else next.font = patch.font;
+        }
+        if (patch.align) {
+          if (patch.align === 'left' || (patch.align === 'justify' && !t.note)) delete next.align;
+          else next.align = patch.align;
+        }
+        if (patch.fontSize) next.fontSize = t.fontSize * (patch.fontSize / lead.fontSize);
+        return next;
+      }),
+    );
+  };
+  const toggleList = (list: 'bullet' | 'number') =>
+    board.replaceElements(texts.map((t) => withSpans(t, spansOf(t), parasOf(t).map(() => (marks.list === list ? {} : { list })))));
 
   return (
     <Glass
       radius={24}
       aria-hidden={!visible}
-      className={`spring absolute bottom-[calc(max(16px,env(safe-area-inset-bottom))+72px)] left-1/2 z-20 -translate-x-1/2 ${visible ? 'opacity-100' : 'pointer-events-none translate-y-2 opacity-0'}`}
+      className={`spring absolute bottom-[calc(max(16px,env(safe-area-inset-bottom))+72px)] left-1/2 z-20 max-w-[calc(100vw-24px)] -translate-x-1/2 ${visible ? 'opacity-100' : 'pointer-events-none translate-y-2 opacity-0'}`}
       role="toolbar"
       aria-label="Selection"
     >
-      <div className="flex items-center gap-0.5 p-1">
-        <span className="px-3 text-footnote font-semibold whitespace-nowrap text-label-2 tabular-nums">{count} selected</span>
+      <div className="flex items-center gap-0.5 overflow-x-auto p-1 [scrollbar-width:none]" inert={!visible}>
+        <span className="px-3 text-footnote font-semibold whitespace-nowrap text-label-2 tabular-nums max-sm:hidden" aria-live="polite">{count} selected</span>
         {allText && (
           <>
             <FormatButtons state={marks} onToggle={toggle} tabIndex={tab} />
+            <ColorButton value={texts[0].color} onPick={setColor} appearance={appearance} tabIndex={tab} />
+            <TextStyleButton style={textStyleOf(texts)} marks={marks} onStyle={setStyle} onToggle={toggle} onList={toggleList} tabIndex={tab} />
+            {link && <ToolButton icon="link" iconSize={17} label={`Open ${link}`} tabIndex={tab} onClick={() => window.open(link, '_blank', 'noopener')} />}
             <Divider />
           </>
         )}
@@ -334,12 +438,20 @@ export function SelectionBar() {
             >
               <Icon name="equation" size={17} /> Edit
             </button>
+            <ToolButton icon="annotate" iconSize={18} label="Annotate" tabIndex={tab} onClick={() => annotateEquation(equation.id)} />
+            <ToolButton icon="clipboard" iconSize={18} label="Copy as MathML" tabIndex={tab} onClick={() => copyMathML(equation.id)} />
+          </>
+        )}
+        {boxedOnly && (
+          <>
+            <ToolButton icon="rotate" iconSize={18} label="Rotate 90°" tabIndex={tab} onClick={() => rotateSelection(90)} />
+            <ToolButton icon="flipH" iconSize={18} label="Flip horizontal" tabIndex={tab} onClick={() => flipSelection('x')} />
+            <ToolButton icon="flipV" iconSize={18} label="Flip vertical" tabIndex={tab} onClick={() => flipSelection('y')} />
             <Divider />
           </>
         )}
+        <ArrangeButton count={count} grouped={grouped} locked={locked} tab={tab} />
         <ToolButton icon="duplicate" label="Duplicate" shortcut="⌘D" iconSize={19} tabIndex={tab} onClick={duplicateSelection} />
-        <ToolButton icon="chevronRight" label="Bring to front" shortcut="]" iconSize={14} className="-rotate-90" tabIndex={tab} onClick={() => reorderSelection(true)} />
-        <ToolButton icon="chevronLeft" label="Send to back" shortcut="[" iconSize={14} className="-rotate-90" tabIndex={tab} onClick={() => reorderSelection(false)} />
         <ToolButton icon="trash" label="Delete" shortcut="⌫" iconSize={19} className="text-danger!" tabIndex={tab} onClick={deleteSelection} />
       </div>
     </Glass>

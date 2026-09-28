@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { onImageLoaded } from '../engine/renderer';
+import { onImageLoaded, pruneImages, usedImageKeys } from '../engine/renderer';
 import { boardTheme, type Appearance } from '../engine/theme';
 import { board } from '../state/board';
 import { ui } from '../state/ui';
@@ -36,9 +36,12 @@ export function BoardCanvas({ appearance, readOnly = false, events }: BoardCanva
     c.updateCursor();
     const offImg = onImageLoaded(() => c.invalidate(true));
     const offUI = ui.subscribe(() => c.updateCursor());
+    // Memory: when a different lesson loads, let go of the last one's decoded images.
+    const offDoc = board.subscribe((ch) => ch.type === 'replace' && pruneImages(usedImageKeys(board.doc.pages)));
     return () => {
       offImg();
       offUI();
+      offDoc();
       c.destroy();
       setController(null);
       ctrl.current = null;

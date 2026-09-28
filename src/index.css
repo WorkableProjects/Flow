@@ -252,12 +252,42 @@ body {
 .board-editor:focus-visible { outline: none; }
 .board-editor b,
 .board-editor strong { font-weight: 700; }
-.board-editor u {
+.board-editor u,
+.board-editor a {
+  text-decoration: underline;
   text-decoration-thickness: 0.065em;
   text-underline-offset: 0.12em;
 }
+.board-editor a { color: var(--link); }
+.board-editor [data-color] { text-decoration-color: currentColor; }
+.board-editor s { text-decoration-thickness: 0.065em; }
+.board-editor code {
+  font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 1em;
+  background: var(--code-fill);
+  border-radius: 0.18em;
+  box-shadow: 0 0 0 0.08em var(--code-fill);
+}
+.board-editor mark { background: var(--mark-fill); color: inherit; }
+/* Lists: indented paragraphs with a bullet or number, numbered in runs. */
+.board-editor { counter-reset: flow-list; }
+.board-editor > div { position: relative; }
+.board-editor > div:not([data-list='number']) { counter-reset: flow-list; }
+.board-editor > div[data-list] { padding-left: 1.5em; }
+.board-editor > div[data-list='number'] { counter-increment: flow-list; }
+.board-editor > div[data-list]::before {
+  position: absolute;
+  right: calc(100% - 1.2em);
+  white-space: nowrap;
+  font-weight: 500;
+  font-style: normal;
+}
+.board-editor > div[data-list='bullet']::before { content: '•'; }
+.board-editor > div[data-list='number']::before { content: counter(flow-list) '.'; }
+.board-editor[data-empty='true'] > div::before { content: none; }
 .board-editor[data-empty='true']::before {
   content: attr(data-placeholder);
+  position: absolute;
   color: var(--label-3);
   pointer-events: none;
 }

@@ -62,7 +62,33 @@ function cleanCorners(poly: P[], minGap: number): P[] {
   return pts;
 }
 
+/** Snap a line within a few degrees of horizontal, vertical or 45° onto it (length kept). */
+export function straighten(r: Recognized): Recognized {
+  const dx = r.x2 - r.x1, dy = r.y2 - r.y1;
+  const a = Math.atan2(dy, dx);
+  const step = Math.PI / 4;
+  const snapped = Math.round(a / step) * step;
+  if (Math.abs(a - snapped) > (6 * Math.PI) / 180) return r;
+  const len = Math.hypot(dx, dy);
+  return { ...r, x2: r.x1 + Math.cos(snapped) * len, y2: r.y1 + Math.sin(snapped) * len };
+}
+
+/** Nearly round ellipses become circles, nearly square rectangles become squares (about their centre). */
+export function regularize(r: Recognized): Recognized {
+  if (r.kind !== 'ellipse' && r.kind !== 'rect') return r;
+  const w = Math.abs(r.x2 - r.x1), h = Math.abs(r.y2 - r.y1);
+  if (Math.min(w, h) / Math.max(w, h) < 0.86) return r;
+  const s = (w + h) / 2, cx = (r.x1 + r.x2) / 2, cy = (r.y1 + r.y2) / 2;
+  return { ...r, x1: cx - s / 2, y1: cy - s / 2, x2: cx + s / 2, y2: cy + s / 2 };
+}
+
 export function recognize(flat: ArrayLike<number>): Recognized | null {
+  const r = recognizeRaw(flat);
+  if (!r) return null;
+  return r.kind === 'line' ? straighten(r) : regularize(r);
+}
+
+function recognizeRaw(flat: ArrayLike<number>): Recognized | null {
   const raw: P[] = [];
   for (let i = 0; i + 1 < flat.length; i += 3) raw.push([flat[i], flat[i + 1]]);
   if (raw.length < 4) return null;

@@ -44,3 +44,21 @@ describe('recognize', () => {
     expect(recognize(flat(pts))).toBeNull();
   });
 });
+
+import { regularize, straighten } from './recognize';
+
+describe('shape clean-up', () => {
+  it('straightens nearly horizontal lines, keeping length', () => {
+    const r = straighten({ kind: 'line', x1: 0, y1: 0, x2: 100, y2: 5 });
+    expect(r.y2).toBeCloseTo(0);
+    expect(r.x2).toBeCloseTo(Math.hypot(100, 5));
+    expect(straighten({ kind: 'line', x1: 0, y1: 0, x2: 100, y2: 30 }).y2).toBe(30);
+  });
+
+  it('turns near-circles into circles and near-squares into squares', () => {
+    const c = regularize({ kind: 'ellipse', x1: 0, y1: 0, x2: 100, y2: 92 });
+    expect(c.x2 - c.x1).toBeCloseTo(c.y2 - c.y1);
+    const e = regularize({ kind: 'ellipse', x1: 0, y1: 0, x2: 100, y2: 60 });
+    expect(e.y2).toBe(60);
+  });
+});

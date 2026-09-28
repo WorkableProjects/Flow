@@ -51,3 +51,42 @@ describe('snapToRing', () => {
     expect(p.x).toBeCloseTo(96, 5);
   });
 });
+
+import { configuration, configurationText, findElement, orbitalFilling, shellCounts } from './chem';
+import { bohrElement, elementTile, orbitalDiagram } from './presets';
+
+describe('chemistry', () => {
+  it('builds ground-state configurations, including exceptions', () => {
+    expect(configurationText(8)).toBe('1s² 2s² 2p⁴');
+    expect(configurationText(24)).toBe('1s² 2s² 2p⁶ 3s² 3p⁶ 3d⁵ 4s¹');
+    expect(configurationText(29)).toContain('3d¹⁰ 4s¹');
+    expect(configuration(46).some((s) => s.n === 5)).toBe(false);
+    expect(shellCounts(19)).toEqual([2, 8, 8, 1]);
+    expect(findElement('fe')?.z).toBe(26);
+    expect(findElement('Carb')?.symbol).toBe('C');
+  });
+
+  it("fills orbitals by Hund's rule", () => {
+    expect(orbitalFilling(1, 4)).toEqual([2, 1, 1]);
+    expect(orbitalFilling(2, 5)).toEqual([1, 1, 1, 1, 1]);
+    expect(orbitalFilling(0, 2)).toEqual([2]);
+  });
+
+  it('orbital diagrams draw one box per orbital and one arrow per electron', () => {
+    for (const style of ['energy', 'row'] as const) {
+      const els = orbitalDiagram(8, style, { cx: 0, cy: 0, unit: 1, color: 'label' });
+      const rects = els.filter((e) => e.type === 'shape' && e.kind === 'rect');
+      const arrows = els.filter((e) => e.type === 'shape' && e.kind === 'arrow');
+      expect(rects).toHaveLength(5);
+      expect(arrows.length - (style === 'energy' ? 1 : 0)).toBe(8);
+      expect(new Set(els.map((e) => e.groupId)).size).toBe(1);
+    }
+  });
+
+  it('Bohr models of real elements place every electron', () => {
+    const els = bohrElement(11, { cx: 0, cy: 0, unit: 1, color: 'label' });
+    expect(els.filter((e) => e.type === 'dot')).toHaveLength(11);
+    expect(els.some((e) => e.type === 'text' && e.text === 'n = 12')).toBe(true);
+    expect(elementTile(6, { cx: 0, cy: 0, unit: 1, color: 'label' }).some((e) => e.type === 'text' && e.text === 'C')).toBe(true);
+  });
+});

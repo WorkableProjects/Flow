@@ -1,4 +1,5 @@
 import { uid } from './geometry';
+import { normalizeSpans, textFields } from './richtext';
 import type { Background, BoardElement, Camera, FlowDocument, Page } from './types';
 
 // ─── Operations (the unit of undo/redo and of sync) ──────────────────
@@ -12,7 +13,10 @@ export type Op =
   | { kind: 'elements'; pageId: string; removed: Placed[]; added: Placed[] }
   | { kind: 'page'; action: 'insert' | 'delete'; index: number; page: Page }
   | { kind: 'pageProps'; pageId: string; before: PageProps; after: PageProps }
-  | { kind: 'title'; before: string; after: string };
+  | { kind: 'title'; before: string; after: string }
+  | { kind: 'movePage'; from: number; to: number }
+  /** Several ops undone and redone as one step (e.g. align, group, split erase). */
+  | { kind: 'batch'; ops: Op[] };
 
 type PageProps = Partial<Pick<Page, 'name' | 'background'>>;
 
@@ -34,7 +38,23 @@ export function invert(op: Op): Op {
       return { ...op, before: op.after, after: op.before };
     case 'title':
       return { ...op, before: op.after, after: op.before };
+    case 'movePage':
+      return { kind: 'movePage', from: op.to, to: op.from };
+    case 'batch':
+      return { kind: 'batch', ops: op.ops.map(invert).reverse() };
   }
+}
+
+/** The page an op touches, if it touches exactly one. */
+export function opPageId(op: Op): string | null {
+  if (op.kind === 'elements' || op.kind === 'pageProps') return op.pageId;
+  if (op.kind === 'batch') {
+    for (const o of op.ops) {
+      const id = opPageId(o);
+      if (id) return id;
+    }
+  }
+  return null;
 }
 
 // ─── Document factories ───────────────────────────────────────────────
@@ -48,6 +68,24 @@ export function createPage(name: string, background: Background = 'dots'): Page 
 export function createDocument(): FlowDocument {
   const page = createPage('Page 1');
   return { version: 1, id: uid(), title: 'Untitled Lesson', pages: [page], activePage: page.id, updatedAt: Date.now() };
+}
+
+/**
+ * Clean untrusted content in place: rich text marks (only safe links),
+ * paragraph styles, and missing fields from older versions.
+ */
+export function sanitizeDocument(doc: FlowDocument): FlowDocument {
+  for (const page of doc.pages) {
+    page.elements = page.elements.filter((el) => el && typeof el.id === 'string' && typeof el.type === 'string').map((el) => {
+      if (el.type !== 'text') return el;
+      const text = typeof el.text === 'string' ? el.text : '';
+      const spans = Array.isArray(el.spans) ? normalizeSpans(el.spans.filter((s) => s && typeof s.text === 'string')) : [{ text }];
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { spans: _s, paras: _p, ...rest } = el;
+      return { ...rest, ...textFields(spans, Array.isArray(el.paras) ? el.paras : undefined) };
+    });
+  }
+  return doc;
 }
 
 /** Structural validation for documents coming from files, storage or peers. */
@@ -70,6 +108,8 @@ export class BoardStore {
   private undoStack: Op[] = [];
   private redoStack: Op[] = [];
   private listeners = new Set<Listener>();
+  /** Ops collected by an open `transaction`. */
+  private batching: Op[] | null = null;
 
   constructor(doc: FlowDocument = createDocument()) {
     this.doc = doc;
@@ -150,6 +190,19 @@ export class BoardStore {
       case 'title':
         this.doc.title = op.after;
         return true;
+      case 'movePage': {
+        const pages = this.doc.pages.slice();
+        if (op.from < 0 || op.from >= pages.length || op.to < 0 || op.to >= pages.length) return false;
+        const [p] = pages.splice(op.from, 1);
+        pages.splice(op.to, 0, p);
+        this.doc.pages = pages;
+        return true;
+      }
+      case 'batch': {
+        let any = false;
+        for (const o of op.ops) any = this.applyOp(o) || any;
+        return any;
+      }
     }
   }
 
@@ -160,9 +213,37 @@ export class BoardStore {
     );
   }
 
+  /**
+   * Run `fn`, folding every commit it makes into a single undo step.
+   * Listeners still hear each op as it happens.
+   */
+  transaction(fn: () => void) {
+    if (this.batching) return fn();
+    this.batching = [];
+    try {
+      fn();
+    } finally {
+      const ops = this.batching;
+      this.batching = null;
+      if (ops.length) {
+        this.undoStack.push(ops.length === 1 ? ops[0] : { kind: 'batch', ops });
+        if (this.undoStack.length > HISTORY_LIMIT) this.undoStack.shift();
+        this.redoStack = [];
+        this.version++;
+        for (const l of this.listeners) l({ type: 'op', op: { kind: 'batch', ops: [] }, source: 'history', appendOnly: false });
+      }
+    }
+  }
+
   /** Apply an op, record it for undo, and notify listeners. */
   commit(op: Op) {
     if (!this.applyOp(op)) return;
+    if (this.batching) {
+      this.batching.push(op);
+      const page = op.kind === 'elements' ? this.pageById(op.pageId) : undefined;
+      this.emit({ type: 'op', op, source: 'local', appendOnly: BoardStore.isAppendOnly(op, page) });
+      return;
+    }
     this.undoStack.push(op);
     if (this.undoStack.length > HISTORY_LIMIT) this.undoStack.shift();
     this.redoStack = [];
@@ -198,7 +279,7 @@ export class BoardStore {
 
   /** Undoing on another page would be invisible — switch to it first. */
   private focusOpPage(op: Op) {
-    const id = op.kind === 'elements' || op.kind === 'pageProps' ? op.pageId : null;
+    const id = opPageId(op);
     if (id && id !== this.doc.activePage && this.pageById(id)) {
       this.doc.activePage = id;
       this.emit({ type: 'activePage' });
@@ -281,11 +362,7 @@ export class BoardStore {
     const from = this.doc.pages.findIndex((p) => p.id === id);
     const to = from + delta;
     if (from < 0 || to < 0 || to >= this.doc.pages.length) return;
-    const pages = this.doc.pages.slice();
-    const [p] = pages.splice(from, 1);
-    pages.splice(to, 0, p);
-    this.doc.pages = pages;
-    this.emit({ type: 'replace' });
+    this.commit({ kind: 'movePage', from, to });
   }
 
   setPageProps(props: PageProps, pageId = this.page.id) {
@@ -313,7 +390,7 @@ export class BoardStore {
   // Whole-document replacement --------------------------------------
 
   load(doc: FlowDocument) {
-    this.doc = doc;
+    this.doc = sanitizeDocument(doc);
     if (!this.pageById(doc.activePage)) doc.activePage = doc.pages[0].id;
     this.undoStack = [];
     this.redoStack = [];

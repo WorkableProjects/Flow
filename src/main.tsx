@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import './index.css';
 import { Root } from './Root';
 import { PresenterApp } from './PresenterApp';
+import { SharedApp } from './SharedApp';
 import { board } from './state/board';
 
 declare global {
@@ -13,8 +14,8 @@ declare global {
 // Benchmark hook (scripts/perf.mjs): exposes the store only when asked.
 if (new URLSearchParams(location.search).has('bench')) window.__flowBoard = board;
 
-const presenting = new URLSearchParams(location.search).get('view') === 'present';
+const view = new URLSearchParams(location.search).get('view');
 
 createRoot(document.getElementById('root')!).render(
-  <StrictMode>{presenting ? <PresenterApp /> : <Root />}</StrictMode>,
+  <StrictMode>{view === 'present' ? <PresenterApp /> : view === 'shared' ? <SharedApp /> : <Root />}</StrictMode>,
 );

@@ -81,16 +81,25 @@ export function Root() {
 
   useEffect(() => {
     if (motion !== 'pending') return;
+    let started = false;
+    const start = () => {
+      if (started) return;
+      started = true;
+      setMotion('open');
+      timer.current = window.setTimeout(() => {
+        setBehind(null);
+        setMotion(null);
+      }, OPEN_MS);
+    };
     let raf = requestAnimationFrame(() => {
-      raf = requestAnimationFrame(() => {
-        setMotion('open');
-        timer.current = window.setTimeout(() => {
-          setBehind(null);
-          setMotion(null);
-        }, OPEN_MS);
-      });
+      raf = requestAnimationFrame(start);
     });
-    return () => cancelAnimationFrame(raf);
+    // Background tabs may not run animation frames: never leave the board held closed.
+    const fallback = window.setTimeout(start, 250);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(fallback);
+    };
   }, [motion]);
 
   /** Board → Home: save, then the board folds back into the tap as Home returns. */

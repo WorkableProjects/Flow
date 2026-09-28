@@ -7,12 +7,14 @@ import { BubbleGroup } from './Bubble';
 import { Toggle } from './controls';
 import { Popover } from './Popover';
 
-export const SHAPES: { kind: Exclude<ShapeKind, 'polygon'>; icon: IconName; label: string; key?: string }[] = [
+export const SHAPES: { kind: ShapeKind; icon: IconName; label: string; key?: string }[] = [
   { kind: 'rect', icon: 'rect', label: 'Rectangle', key: 'R' },
   { kind: 'ellipse', icon: 'ellipse', label: 'Ellipse', key: 'O' },
   { kind: 'triangle', icon: 'triangle', label: 'Triangle' },
   { kind: 'line', icon: 'line', label: 'Line' },
   { kind: 'arrow', icon: 'arrow', label: 'Arrow', key: 'A' },
+  { kind: 'polygon', icon: 'polygon', label: 'Polygon — tap each corner, tap the first to close', key: 'G' },
+  { kind: 'callout', icon: 'callout', label: 'Callout', key: 'B' },
 ];
 
 export const SIZES: Record<'pen' | 'highlighter' | 'shape' | 'text' | 'dot', { min: number; max: number; presets: number[] }> = {
@@ -87,7 +89,12 @@ export function Inspector({ open, onClose, anchor, appearance }: { open: boolean
             aria-label="Eraser size"
           />
         </Row>
-        <p className="mt-1 text-footnote text-label-2">Erases whole strokes it touches. Undo with ⌘Z.</p>
+        <Row label="Partial erase">
+          <Toggle checked={s.eraserMode === 'segment'} onChange={(v) => ui.set({ eraserMode: v ? 'segment' : 'object' })} label="Partial erase" />
+        </Row>
+        <p className="mt-1 text-footnote text-label-2">
+          {s.eraserMode === 'segment' ? 'Erases only the part of a stroke you touch; shapes and text go whole.' : 'Erases whole strokes and objects it touches.'} Locked items are never erased. Undo with ⌘Z.
+        </p>
       </Popover>
     );
   }
@@ -183,6 +190,25 @@ export function Inspector({ open, onClose, anchor, appearance }: { open: boolean
         <span className="w-7 text-right text-footnote text-label-2 tabular-nums">{style.size}</span>
       </div>
 
+      {key === 'pen' && (
+        <div className="mt-2 border-t border-hairline pt-2">
+          <Row label="Smoothing">
+            <input
+              type="range"
+              className="slider w-40"
+              min={0}
+              max={100}
+              value={Math.round(s.penSmoothing * 100)}
+              onChange={(e) => ui.set({ penSmoothing: +e.target.value / 100 })}
+              aria-label="Pen smoothing"
+            />
+          </Row>
+          <Row label="Pressure sensitivity">
+            <Toggle checked={s.penPressure} onChange={(v) => ui.set({ penPressure: v })} label="Pressure sensitivity" />
+          </Row>
+          <p className="text-footnote text-label-2">Pencil pressure shapes the line; off draws a constant width.</p>
+        </div>
+      )}
       {(key === 'pen' || key === 'highlighter') && (
         <div className="mt-2 border-t border-hairline pt-2">
           <Row label="Hold to snap shapes">
@@ -204,7 +230,9 @@ export function Inspector({ open, onClose, anchor, appearance }: { open: boolean
           <Row label="Fill">
             <Toggle checked={s.shape.fill} onChange={(v) => setStyle({ fill: v } as never)} label="Fill shapes" />
           </Row>
-          <p className="text-footnote text-label-2">Hold ⇧ Shift for squares, circles and 45° lines.</p>
+          <p className="text-footnote text-label-2">
+            {s.shapeKind === 'polygon' ? 'Tap each corner; tap the first corner (or press Return) to close it.' : 'Hold ⇧ Shift for squares, circles and 45° lines.'}
+          </p>
         </div>
       )}
     </Popover>

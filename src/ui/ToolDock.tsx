@@ -3,19 +3,17 @@ import type { IconName } from '../icons/Icon';
 import { Icon } from '../icons/Icon';
 import { NOTE_TINTS, PALETTE, swatch, type Appearance } from '../engine/theme';
 import type { ColorToken, Tool } from '../engine/types';
-import { pickImage } from '../state/actions';
-import { setTool, ui, useUI, type UIState } from '../state/ui';
+import { clearPage, pickImage } from '../state/actions';
+import { setTool, ui, useUI, type DockTool, type UIState } from '../state/ui';
 import { BubbleGroup } from './Bubble';
 import { Divider, ToolButton } from './controls';
 import { Glass } from './Glass';
 import { COLOR_NAMES, Inspector, SHAPES, SIZES } from './Inspector';
 
-const TOOLS: { tool: Tool; icon: IconName; label: string; key: string }[] = [
+/** Every tool the dock can show; the user picks which, and in what order (Settings › Customize Toolbar). */
+export const TOOL_CATALOG: { tool: DockTool; icon: IconName; label: string; key: string }[] = [
   { tool: 'select', icon: 'select', label: 'Select', key: 'V' },
   { tool: 'hand', icon: 'hand', label: 'Pan', key: 'H' },
-];
-
-const INK: { tool: Tool; icon: IconName; label: string; key: string }[] = [
   { tool: 'pen', icon: 'pen', label: 'Pen', key: 'P' },
   { tool: 'highlighter', icon: 'highlighter', label: 'Highlighter', key: 'M' },
   { tool: 'eraser', icon: 'eraser', label: 'Eraser', key: 'E' },
@@ -23,7 +21,10 @@ const INK: { tool: Tool; icon: IconName; label: string; key: string }[] = [
   { tool: 'shape', icon: 'shapes', label: 'Shapes', key: 'S' },
   { tool: 'dot', icon: 'dot', label: 'Dot', key: 'D' },
   { tool: 'text', icon: 'text', label: 'Text', key: 'T' },
+  { tool: 'image', icon: 'image', label: 'Insert image', key: 'I' },
 ];
+const TOOLS = TOOL_CATALOG.filter((t) => t.tool !== 'image') as { tool: Tool; icon: IconName; label: string; key: string }[];
+const NAV = new Set<DockTool>(['select', 'hand']);
 
 /** Keyboard-only tools (share a dock button with another tool). */
 const EXTRA_KEYS: { tool: Tool; key: string }[] = [{ tool: 'note', key: 'N' }];
@@ -59,6 +60,10 @@ export function ToolDock({ appearance }: { appearance: Appearance }) {
   const shapeKind = useUI((s) => s.shapeKind);
   const textKind = useUI((s) => s.textKind);
   const color = useUI(currentColor);
+  const dockTools = useUI((s) => s.dockTools);
+  const shown = dockTools.map((t) => TOOL_CATALOG.find((c) => c.tool === t)!).filter(Boolean);
+  const nav = shown.filter((t) => NAV.has(t.tool));
+  const rest = shown.filter((t) => !NAV.has(t.tool));
   const [inspector, setInspector] = useState(false);
   const wellRef = useRef<HTMLButtonElement>(null);
 
@@ -85,22 +90,25 @@ export function ToolDock({ appearance }: { appearance: Appearance }) {
         aria-label="Tools"
       >
         <BubbleGroup active={dockKey(tool)} className="flex items-center gap-0.5 overflow-x-auto p-1.5 [scrollbar-width:none]">
-          {TOOLS.map((t) => (
-            <ToolButton key={t.tool} data-bubble={t.tool} icon={t.icon} label={t.label} shortcut={t.key} active={tool === t.tool} onClick={() => choose(t.tool)} />
+          {nav.map((t) => (
+            <ToolButton key={t.tool} data-bubble={t.tool} icon={t.icon} label={t.label} shortcut={t.key} active={tool === t.tool} onClick={() => choose(t.tool as Tool)} />
           ))}
-          <Divider />
-          {INK.map((t) => (
-            <ToolButton
-              key={t.tool}
-              data-bubble={t.tool}
-              icon={iconFor(t.tool, t.icon)}
-              label={t.tool === 'text' ? 'Text & sticky notes' : t.label}
-              shortcut={t.tool === 'text' ? 'T · N' : t.key}
-              active={dockKey(tool) === t.tool}
-              onClick={() => choose(t.tool)}
-            />
-          ))}
-          <ToolButton icon="image" label="Insert image" shortcut="I" onClick={pickImage} />
+          {nav.length > 0 && rest.length > 0 && <Divider />}
+          {rest.map((t) =>
+            t.tool === 'image' ? (
+              <ToolButton key="image" icon="image" label="Insert image" shortcut="I" onClick={pickImage} />
+            ) : (
+              <ToolButton
+                key={t.tool}
+                data-bubble={t.tool}
+                icon={iconFor(t.tool as Tool, t.icon)}
+                label={t.tool === 'text' ? 'Text & sticky notes' : t.label}
+                shortcut={t.tool === 'text' ? 'T · N' : t.key}
+                active={dockKey(tool) === t.tool}
+                onClick={() => choose(t.tool as Tool)}
+              />
+            ),
+          )}
           <Divider />
           <button
             ref={wellRef}
@@ -285,8 +293,35 @@ function ToolShelf({ appearance, onMore }: { appearance: Appearance; onMore: () 
   } else if (layout === 'eraser') {
     body = (
       <>
-        <span className="px-3 text-footnote font-semibold whitespace-nowrap text-label-2">Eraser</span>
+        <BubbleGroup active={s.eraserMode} variant="raised" role="radiogroup" label="Eraser mode" className="mx-1 flex items-center rounded-full bg-fill p-0.5">
+          {(['object', 'segment'] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              role="radio"
+              aria-checked={s.eraserMode === m}
+              data-bubble={m}
+              title={m === 'object' ? 'Erase whole strokes and objects' : 'Erase only the part of a stroke you touch'}
+              onClick={() => ui.set({ eraserMode: m })}
+              className={`spring relative flex h-10 shrink-0 items-center gap-1.5 rounded-full px-3 text-footnote font-semibold ${s.eraserMode === m ? 'text-label' : 'text-label-2'}`}
+            >
+              <Icon name={m === 'object' ? 'eraser' : 'eraseSegment'} size={15} />
+              {m === 'object' ? 'Object' : 'Partial'}
+            </button>
+          ))}
+        </BubbleGroup>
+        <Divider />
         <SizeRow presets={[10, 16, 32]} value={s.eraserSize} onPick={(n) => ui.set({ eraserSize: n })} dot={(_n, i) => 6 + i * 5} />
+        <Divider />
+        <button
+          type="button"
+          onClick={() => {
+            if (window.confirm('Clear everything on this page? You can undo this.')) clearPage();
+          }}
+          className="spring flex h-11 shrink-0 items-center gap-1.5 rounded-full px-3 text-footnote font-semibold text-danger hover:bg-fill"
+        >
+          <Icon name="trash" size={15} /> Clear
+        </button>
       </>
     );
   }
@@ -313,7 +348,7 @@ function ToolShelf({ appearance, onMore }: { appearance: Appearance; onMore: () 
 }
 
 export const selectToolByKey = (key: string): boolean => {
-  const all = [...TOOLS, ...INK, ...EXTRA_KEYS];
+  const all = [...TOOLS, ...EXTRA_KEYS];
   const hit = all.find((t) => t.key.toLowerCase() === key.toLowerCase());
   if (hit) {
     setTool(hit.tool);

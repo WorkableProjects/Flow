@@ -1,5 +1,7 @@
-import { lineWidth, splitLines, type RunMeasure } from './richtext';
-import type { BoardElement, Camera, Rect, ShapeElement, TextSpan, Vec } from './types';
+import { layoutText, LINE_HEIGHT, type RunMeasure, type TextLayout } from './richtext';
+import type { BoardElement, Camera, EquationElement, ImageElement, Rect, ShapeElement, TextElement, TextSpan, Vec } from './types';
+
+export { LINE_HEIGHT };
 
 export const uid = (): string =>
   Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
@@ -68,10 +70,11 @@ export function rectFromPoints(ax: number, ay: number, bx: number, by: number): 
 
 const boundsCache = new WeakMap<BoardElement, Rect>();
 
-export const LINE_HEIGHT = 1.3;
-
 /** Approximate width without a DOM; the renderer swaps in canvas metrics. */
-let measureRun: RunMeasure = (text, fontSize, marks) => text.length * fontSize * (marks?.bold ? 0.6 : 0.56);
+let measureRun: RunMeasure = (text, fontSize, marks, font) =>
+  text.length * fontSize * (marks?.code || font === 'mono' ? 0.6 : marks?.bold ? 0.6 : 0.56);
+
+const layouts = new WeakMap<TextElement, TextLayout>();
 
 export function setTextMeasurer(fn: RunMeasure) {
   measureRun = fn;
@@ -84,10 +87,52 @@ export function measureText(text: string, fontSize: number) {
 }
 
 export function measureSpans(spans: TextSpan[], fontSize: number) {
-  const lines = splitLines(spans);
-  const w = lines.reduce((m, l) => Math.max(m, lineWidth(l, fontSize, measureRun)), fontSize * 0.5);
-  return { w, h: lines.length * fontSize * LINE_HEIGHT };
+  const l = layoutText({ text: spans.map((s) => s.text).join(''), spans, fontSize }, measureRun);
+  return { w: l.w, h: l.h };
 }
+
+/** Sticky-note padding in world units (scales with the note). */
+export const NOTE_PAD = 16;
+export const notePad = (note: { w: number }) => NOTE_PAD * (note.w / 220);
+
+/** Shared text layout (renderer, bounds, links, SVG export), cached per element. */
+export function textLayout(el: TextElement): TextLayout {
+  let l = layouts.get(el);
+  if (!l) {
+    const maxW = el.note ? el.note.w - notePad(el.note) * 2 : Infinity;
+    l = layoutText(el, measureRun, maxW);
+    layouts.set(el, l);
+  }
+  return l;
+}
+
+/** Content-box origin of a text element (inside sticky-note padding). */
+export function textOrigin(el: TextElement): Vec {
+  const pad = el.note ? notePad(el.note) : 0;
+  return { x: el.x + pad, y: el.y + pad };
+}
+
+/** The link under world point `p`, if any. */
+export function linkAt(el: TextElement, p: Vec): string | null {
+  const l = textLayout(el);
+  const o = textOrigin(el);
+  for (const line of l.lines) {
+    if (p.y < o.y + line.y || p.y > o.y + line.y + l.lineHeight) continue;
+    for (const r of line.runs) if (r.marks?.link && p.x >= o.x + r.x && p.x <= o.x + r.x + r.w) return r.marks.link;
+  }
+  return null;
+}
+
+/** Axis-aligned bounds of a w×h box rotated about its centre. */
+export function rotatedBounds(x: number, y: number, w: number, h: number, deg = 0): Rect {
+  if (!deg) return { x, y, w, h };
+  const a = (deg * Math.PI) / 180;
+  const c = Math.abs(Math.cos(a)), s = Math.abs(Math.sin(a));
+  const bw = w * c + h * s, bh = w * s + h * c;
+  return { x: x + w / 2 - bw / 2, y: y + h / 2 - bh / 2, w: bw, h: bh };
+}
+
+const boxBounds = (el: ImageElement | EquationElement) => rotatedBounds(el.x, el.y, el.w, el.h, el.rotation);
 
 export function elementBounds(el: BoardElement): Rect {
   const cached = boundsCache.get(el);
@@ -112,6 +157,10 @@ export function elementBounds(el: BoardElement): Rect {
         r = { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
       } else {
         r = rectFromPoints(el.x1, el.y1, el.x2, el.y2);
+        if (el.kind === 'callout') {
+          const [tx, ty] = calloutTail(el);
+          r = unionRects([r, { x: tx, y: ty, w: 0, h: 0 }])!;
+        }
       }
       r = inflate(r, el.size / 2 + (el.kind === 'arrow' ? el.size * 3 : 0));
       break;
@@ -119,14 +168,14 @@ export function elementBounds(el: BoardElement): Rect {
     case 'text': {
       if (el.note) r = { x: el.x, y: el.y, w: el.note.w, h: el.note.h };
       else {
-        const m = el.spans ? measureSpans(el.spans, el.fontSize) : measureText(el.text || ' ', el.fontSize);
+        const m = textLayout(el);
         r = { x: el.x, y: el.y, w: m.w, h: m.h };
       }
       break;
     }
     case 'image':
     case 'equation':
-      r = { x: el.x, y: el.y, w: el.w, h: el.h };
+      r = boxBounds(el);
       break;
     case 'dot':
       r = { x: el.x - el.r, y: el.y - el.r, w: el.r * 2, h: el.r * 2 };
@@ -167,10 +216,61 @@ function segmentsIntersect(ax: number, ay: number, bx: number, by: number, cx: n
   return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
 }
 
+/** Tail tip of a callout (stored, or a default below-left of the box). */
+export function calloutTail(el: ShapeElement): [number, number] {
+  if (el.pts && el.pts.length >= 2) return [el.pts[0], el.pts[1]];
+  const x0 = Math.min(el.x1, el.x2), y1 = Math.max(el.y1, el.y2);
+  const w = Math.abs(el.x2 - el.x1), h = Math.abs(el.y2 - el.y1);
+  return [x0 + w * 0.18, y1 + Math.max(12, h * 0.35)];
+}
+
+/** Where a callout's tail meets the bottom edge: [left x, right x]. */
+export function calloutBase(el: ShapeElement): [number, number] {
+  const x0 = Math.min(el.x1, el.x2), w = Math.abs(el.x2 - el.x1);
+  const [tx] = calloutTail(el);
+  const mid = clamp(tx, x0 + w * 0.2, x0 + w * 0.8);
+  const half = Math.min(w * 0.12, 18 + w * 0.04);
+  return [mid - half, mid + half];
+}
+
+/**
+ * Callout outline as path commands (shared by canvas and SVG so both match):
+ * a rounded box with a tail from the bottom edge.
+ */
+export type PathCmd = ['M' | 'L', number, number] | ['Q', number, number, number, number] | ['Z'];
+
+export function calloutCommands(el: ShapeElement): PathCmd[] {
+  const l = Math.min(el.x1, el.x2), r = Math.max(el.x1, el.x2), t = Math.min(el.y1, el.y2), b = Math.max(el.y1, el.y2);
+  const rad = Math.min(r - l, b - t, 96) * 0.18;
+  const [tx, ty] = calloutTail(el);
+  const [ba, bb] = calloutBase(el);
+  return [
+    ['M', l + rad, t],
+    ['L', r - rad, t],
+    ['Q', r, t, r, t + rad],
+    ['L', r, b - rad],
+    ['Q', r, b, r - rad, b],
+    ['L', bb, b],
+    ['L', tx, ty],
+    ['L', ba, b],
+    ['L', l + rad, b],
+    ['Q', l, b, l, b - rad],
+    ['L', l, t + rad],
+    ['Q', l, t, l + rad, t],
+    ['Z'],
+  ];
+}
+
 /** Outline segments of a shape, flat [ax, ay, bx, by, ...]. */
 export function shapeSegments(el: ShapeElement): number[] {
   const { x1, y1, x2, y2 } = el;
   switch (el.kind) {
+    case 'callout': {
+      const l = Math.min(x1, x2), r = Math.max(x1, x2), t = Math.min(y1, y2), b = Math.max(y1, y2);
+      const [tx, ty] = calloutTail(el);
+      const [ba, bb] = calloutBase(el);
+      return [l, t, r, t, r, t, r, b, r, b, bb, b, bb, b, tx, ty, tx, ty, ba, b, ba, b, l, b, l, b, l, t];
+    }
     case 'line':
     case 'arrow':
       return [x1, y1, x2, y2];

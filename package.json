@@ -1,7 +1,7 @@
 {
   "name": "flow",
   "private": true,
-  "version": "1.0.56",
+  "version": "1.2.0",
   "type": "module",
   "description": "Flow — a fluid, Apple-grade whiteboard for online tutoring.",
   "scripts": {
@@ -28,6 +28,7 @@
   },
   "dependencies": {
     "mathjax-full": "^3.2.2",
+    "pdfjs-dist": "^4.10.38",
     "perfect-freehand": "^1.2.3",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"

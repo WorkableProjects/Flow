@@ -1,10 +1,11 @@
 import { cachedStrokePath } from './freehand';
-import { elementBounds, LINE_HEIGHT, rectsIntersect, setTextMeasurer, viewportRect } from './geometry';
-import { fontFor, splitLines, spansOf, wrapSpans, type RunMeasure } from './richtext';
+import { calloutCommands, elementBounds, NOTE_PAD, rectsIntersect, setTextMeasurer, textLayout, textOrigin, viewportRect } from './geometry';
+import { FONT_STACKS, fontFor, type LaidRun } from './richtext';
 import type { BoardTheme } from './theme';
-import type { Background, BoardElement, Camera, EquationElement, ImageElement, Page, Rect, ShapeElement, TextElement, TextSpan } from './types';
+import type { Background, BoardElement, Camera, EquationElement, ImageElement, Page, Rect, ShapeElement, TextElement } from './types';
 
-export const FONT_STACK = '-apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Segoe UI", system-ui, sans-serif';
+export const FONT_STACK = FONT_STACKS.sans;
+export { NOTE_PAD };
 export const HIGHLIGHT_ALPHA = 0.34;
 
 // Canvas-accurate text metrics for bounds/hit-testing.
@@ -12,8 +13,8 @@ if (typeof document !== 'undefined') {
   const mctx = document.createElement('canvas').getContext('2d');
   if (mctx) {
     let lastFont = '';
-    setTextMeasurer((text, fontSize, marks) => {
-      const font = fontFor(marks, fontSize, FONT_STACK);
+    setTextMeasurer((text, fontSize, marks, family) => {
+      const font = fontFor(marks, fontSize, family);
       if (font !== lastFont) {
         mctx.font = font;
         lastFont = font;
@@ -211,6 +212,9 @@ function drawShape(ctx: CanvasRenderingContext2D, el: ShapeElement, theme: Board
       path.closePath();
       break;
     }
+    case 'callout':
+      calloutPath(path, el);
+      break;
   }
   if (el.fill && el.kind !== 'line' && el.kind !== 'arrow') {
     ctx.fillStyle = color;
@@ -221,40 +225,66 @@ function drawShape(ctx: CanvasRenderingContext2D, el: ShapeElement, theme: Board
   ctx.stroke(path);
 }
 
-export const NOTE_PAD = 16;
-
-/** Canvas metrics for runs, switching fonts only when marks change. */
-function runMeasure(ctx: CanvasRenderingContext2D): RunMeasure {
-  let last = '';
-  return (text, fontSize, marks) => {
-    const font = fontFor(marks, fontSize, FONT_STACK);
-    if (font !== last) ctx.font = last = font;
-    return ctx.measureText(text).width;
-  };
+/** Speech-bubble outline: rounded box with a tail from the bottom edge. */
+export function calloutPath(path: Path2D, el: ShapeElement) {
+  for (const c of calloutCommands(el)) {
+    if (c[0] === 'M') path.moveTo(c[1], c[2]);
+    else if (c[0] === 'L') path.lineTo(c[1], c[2]);
+    else if (c[0] === 'Q') path.quadraticCurveTo(c[1], c[2], c[3], c[4]);
+    else path.closePath();
+  }
 }
 
-/** One line of runs; `y` is the top of the glyph box (textBaseline 'top'). */
-function drawRuns(ctx: CanvasRenderingContext2D, line: TextSpan[], x: number, y: number, fontSize: number, measure: RunMeasure) {
-  let cx = x;
-  for (const run of line) {
-    if (!run.text) continue;
-    const w = measure(run.text, fontSize, run.marks);
-    ctx.fillText(run.text, cx, y);
-    if (run.marks?.underline) {
-      const t = Math.max(fontSize * 0.065, 0.5);
-      ctx.fillRect(cx, y + fontSize * 0.98, w, t);
-    }
-    cx += w;
+/** Decorations and glyphs for one laid-out run; `top` is the line box top. */
+function drawRun(ctx: CanvasRenderingContext2D, run: LaidRun, ox: number, top: number, el: TextElement, theme: BoardTheme, lh: number) {
+  if (!run.text) return;
+  const fs = el.fontSize;
+  const pad = (lh - fs) / 2;
+  const x = ox + run.x;
+  const m = run.marks;
+  if (m?.highlight) {
+    ctx.save();
+    ctx.globalAlpha = theme.appearance === 'dark' ? 0.4 : 0.5;
+    ctx.fillStyle = theme.resolve('yellow');
+    ctx.fillRect(x, top + pad * 0.4, run.w, lh - pad * 0.8);
+    ctx.restore();
   }
+  if (m?.code) {
+    ctx.save();
+    ctx.fillStyle = theme.appearance === 'dark' ? 'rgba(235,235,245,0.14)' : 'rgba(60,60,67,0.09)';
+    ctx.beginPath();
+    ctx.roundRect(x - fs * 0.08, top + pad * 0.5, run.w + fs * 0.16, lh - pad, fs * 0.18);
+    ctx.fill();
+    ctx.restore();
+  }
+  const color = m?.color ? theme.resolve(m.color) : m?.link ? theme.resolve('blue') : theme.resolve(el.color);
+  ctx.fillStyle = color;
+  ctx.font = fontFor(m, fs, el.font);
+  ctx.fillText(run.text, x, top + pad);
+  const t = Math.max(fs * 0.065, 0.5);
+  if (m?.underline || m?.link) ctx.fillRect(x, top + pad + fs * 0.98, run.w, t);
+  if (m?.strike) ctx.fillRect(x, top + pad + fs * 0.52, run.w, t);
 }
 
 function drawText(ctx: CanvasRenderingContext2D, el: TextElement, theme: BoardTheme) {
   ctx.textBaseline = 'top';
   ctx.textAlign = 'left';
-  const lh = el.fontSize * LINE_HEIGHT;
-  const pad = (lh - el.fontSize) / 2;
-  const measure = runMeasure(ctx);
-  const spans = spansOf(el);
+  const layout = textLayout(el);
+  const o = textOrigin(el);
+  const lh = layout.lineHeight;
+  const paint = () => {
+    for (const line of layout.lines) {
+      const top = o.y + line.y;
+      if (line.marker && line.markerX !== undefined) {
+        ctx.fillStyle = theme.resolve(el.color);
+        ctx.font = fontFor(undefined, el.fontSize, el.font);
+        ctx.textAlign = 'right';
+        ctx.fillText(line.marker, o.x + line.markerX, top + (lh - el.fontSize) / 2);
+        ctx.textAlign = 'left';
+      }
+      for (const run of line.runs) drawRun(ctx, run, o.x, top, el, theme, lh);
+    }
+  };
   if (el.note) {
     const { w, h, tint } = el.note;
     const r = Math.min(14, w * 0.06);
@@ -271,15 +301,25 @@ function drawText(ctx: CanvasRenderingContext2D, el: TextElement, theme: BoardTh
     ctx.beginPath();
     ctx.rect(el.x, el.y, w, h);
     ctx.clip();
-    ctx.fillStyle = theme.resolve(el.color);
-    const scale = w / 220;
-    const lines = wrapSpans(spans, w - NOTE_PAD * 2 * scale, el.fontSize, measure);
-    lines.forEach((l, i) => drawRuns(ctx, l, el.x + NOTE_PAD * scale, el.y + NOTE_PAD * scale + pad + i * lh, el.fontSize, measure));
+    paint();
     ctx.restore();
     return;
   }
-  ctx.fillStyle = theme.resolve(el.color);
-  splitLines(spans).forEach((l, i) => drawRuns(ctx, l, el.x, el.y + pad + i * lh, el.fontSize, measure));
+  paint();
+}
+
+/** Rotate / mirror about an element's centre, then draw its w×h box at the origin. */
+function withBoxTransform(ctx: CanvasRenderingContext2D, el: ImageElement | EquationElement, draw: (x: number, y: number) => void) {
+  if (!el.rotation && !el.flipX && !el.flipY) {
+    draw(el.x, el.y);
+    return;
+  }
+  ctx.save();
+  ctx.translate(el.x + el.w / 2, el.y + el.h / 2);
+  if (el.rotation) ctx.rotate((el.rotation * Math.PI) / 180);
+  ctx.scale(el.flipX ? -1 : 1, el.flipY ? -1 : 1);
+  draw(-el.w / 2, -el.h / 2);
+  ctx.restore();
 }
 
 // ─── Equations ────────────────────────────────────────────────────────
@@ -300,17 +340,45 @@ function drawEquation(ctx: CanvasRenderingContext2D, el: EquationElement, theme:
   // Vector source: the browser rasterizes it at the drawn size, so
   // equations stay crisp at every zoom level.
   const img = getImage(url);
-  if (img) ctx.drawImage(img, el.x, el.y, el.w, el.h);
+  if (img) withBoxTransform(ctx, el, (x, y) => ctx.drawImage(img, x, y, el.w, el.h));
 }
 
 function drawImage(ctx: CanvasRenderingContext2D, el: ImageElement, theme: BoardTheme) {
   const img = getImage(el.src);
-  if (!img) {
-    ctx.fillStyle = theme.pattern;
-    ctx.fillRect(el.x, el.y, el.w, el.h);
-    return;
+  withBoxTransform(ctx, el, (x, y) => {
+    if (!img) {
+      ctx.fillStyle = theme.pattern;
+      ctx.fillRect(x, y, el.w, el.h);
+    } else ctx.drawImage(img, x, y, el.w, el.h);
+  });
+}
+
+/**
+ * Forget decoded images no document uses any more (e.g. after switching
+ * lessons), so big photos and PDF pages don't pile up in memory.
+ */
+export function pruneImages(keep: Iterable<string>) {
+  const live = new Set(keep);
+  for (const [src, img] of images) {
+    if (live.has(src)) continue;
+    img.onload = null;
+    img.src = '';
+    images.delete(src);
   }
-  ctx.drawImage(img, el.x, el.y, el.w, el.h);
+}
+
+export const imageCacheSize = () => images.size;
+
+/** Every decoded-image key a set of pages still needs (photos and typeset equations). */
+export function usedImageKeys(pages: Page[]): string[] {
+  const out: string[] = [];
+  for (const p of pages) {
+    for (const el of p.elements) {
+      if (el.type === 'image') out.push(el.src);
+      else if (el.type === 'equation') out.push(...(equationUrls.get(el)?.values() ?? []));
+    }
+  }
+  return out;
 }
 
 export function drawElement(ctx: CanvasRenderingContext2D, el: BoardElement, theme: BoardTheme) {

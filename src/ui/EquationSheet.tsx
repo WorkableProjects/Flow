@@ -2,7 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { getController } from '../canvas/instance';
 import { uid } from '../engine/geometry';
-import { EM_PX, loadTex, typeset, type TypesetResult } from '../engine/latex';
+import { EM_PX, loadTex, toMathML, typeset, type MathMode, type TypesetResult } from '../engine/latex';
+import { LIBRARY, SYMBOLS } from '../engine/mathLibrary';
+import { toast } from '../state/ui';
+import { BubbleGroup } from './Bubble';
 import { equationDataUrl } from '../engine/renderer';
 import { swatch, type Appearance } from '../engine/theme';
 import type { EquationElement } from '../engine/types';
@@ -13,24 +16,6 @@ import { ui, useUI } from '../state/ui';
 import { ToolButton } from './controls';
 
 const EXAMPLE = String.raw`\int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}`;
-
-/** Quick inserts; `|` marks where the caret lands. */
-const SNIPPETS: { label: string; tex: string }[] = [
-  { label: 'a⁄b', tex: String.raw`\frac{|}{}` },
-  { label: '√x', tex: String.raw`\sqrt{|}` },
-  { label: 'xⁿ', tex: '^{|}' },
-  { label: 'xₙ', tex: '_{|}' },
-  { label: '∑', tex: String.raw`\sum_{i=1}^{n} |` },
-  { label: '∫', tex: String.raw`\int_{a}^{b} | \,dx` },
-  { label: 'lim', tex: String.raw`\lim_{x \to |}` },
-  { label: '( )', tex: String.raw`\left( | \right)` },
-  { label: 'Matrix', tex: String.raw`\begin{pmatrix} | & b \\ c & d \end{pmatrix}` },
-  { label: 'π', tex: String.raw`\pi ` },
-  { label: 'θ', tex: String.raw`\theta ` },
-  { label: '≤', tex: String.raw`\le ` },
-  { label: '≠', tex: String.raw`\ne ` },
-  { label: '±', tex: String.raw`\pm ` },
-];
 
 /** Board units per em for an equation already on the board (keeps its size when re-edited). */
 function emSizeOf(el: EquationElement) {
@@ -51,6 +36,8 @@ export function EquationSheet({ appearance }: { appearance: Appearance }) {
   const [result, setResult] = useState<TypesetResult | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [mode, setMode] = useState<MathMode>('block');
+  const [tab, setTab] = useState<string>(SYMBOLS[0].group);
   const input = useRef<HTMLTextAreaElement>(null);
   const sheet = useRef<HTMLElement>(null);
 
@@ -58,6 +45,7 @@ export function EquationSheet({ appearance }: { appearance: Appearance }) {
   useEffect(() => {
     if (!open) return;
     setSource(editing?.latex ?? '');
+    setMode(editing?.mode ?? 'block');
     setResult(null);
     setError('');
     setLoading(true);
@@ -78,7 +66,7 @@ export function EquationSheet({ appearance }: { appearance: Appearance }) {
     if (!open) return;
     let stale = false;
     const t = window.setTimeout(async () => {
-      const r = await typeset(source);
+      const r = await typeset(source, mode);
       if (stale) return;
       if ('error' in r) {
         setResult(null);
@@ -92,7 +80,7 @@ export function EquationSheet({ appearance }: { appearance: Appearance }) {
       stale = true;
       clearTimeout(t);
     };
-  }, [source, open, loading]);
+  }, [source, open, loading, mode]);
 
   const close = () => {
     // Hand the keyboard back to the board while the sheet animates out.
@@ -121,7 +109,8 @@ export function EquationSheet({ appearance }: { appearance: Appearance }) {
     const color = editing?.color ?? ui.get().text.color;
     if (editing) {
       const em = emSizeOf(editing);
-      const next: EquationElement = { ...editing, latex: source.trim(), svg: result.svg, w: result.wEm * em, h: result.hEm * em, color };
+      const next: EquationElement = { ...editing, latex: source.trim(), svg: result.svg, w: result.wEm * em, h: result.hEm * em, color, mode };
+      if (mode === 'block') delete next.mode;
       board.replaceElements([next]);
       ui.set({ tool: 'select', selection: new Set([next.id]) });
     } else {
@@ -129,12 +118,23 @@ export function EquationSheet({ appearance }: { appearance: Appearance }) {
       const em = (Math.max(22, ui.get().text.size) * 1.2) / z;
       const c = getController()?.worldCenter() ?? { x: 0, y: 0 };
       const w = result.wEm * em, h = result.hEm * em;
-      const el: EquationElement = { id: uid(), type: 'equation', x: c.x - w / 2, y: c.y - h / 2, w, h, latex: source.trim(), svg: result.svg, color };
+      const el: EquationElement = { id: uid(), type: 'equation', x: c.x - w / 2, y: c.y - h / 2, w, h, latex: source.trim(), svg: result.svg, color, ...(mode === 'inline' ? { mode } : {}) };
       board.addElements([el]);
       ui.set({ tool: 'select', selection: new Set([el.id]) });
     }
     close();
   };
+
+  const copyMathML = async () => {
+    try {
+      await navigator.clipboard.writeText(await toMathML(source, mode));
+      toast('MathML copied');
+    } catch {
+      toast('Couldn’t copy MathML');
+    }
+  };
+
+  const palette = tab === 'Library' ? null : SYMBOLS.find((g) => g.group === tab) ?? SYMBOLS[0];
 
   if (!mounted) return null;
   const previewColor = swatch('label', appearance);
@@ -179,19 +179,59 @@ export function EquationSheet({ appearance }: { appearance: Appearance }) {
         />
       </label>
 
-      <div className="-mx-1 mt-2 flex gap-1 overflow-x-auto px-1 pb-1 [scrollbar-width:none]" role="toolbar" aria-label="Insert symbol">
-        {SNIPPETS.map((s) => (
+      <div className="-mx-1 mt-2 flex gap-1 overflow-x-auto px-1 pb-1 [scrollbar-width:none]" role="tablist" aria-label="Palette">
+        {[...SYMBOLS.map((g) => g.group), 'Library'].map((g) => (
           <button
-            key={s.label}
+            key={g}
             type="button"
-            title={s.tex.replace('|', '')}
-            onClick={() => insertSnippet(s.tex)}
-            className="spring h-9 shrink-0 rounded-full bg-fill px-3 text-footnote font-semibold text-label hover:bg-fill-2 active:scale-[0.94]"
+            role="tab"
+            aria-selected={tab === g}
+            onClick={() => setTab(g)}
+            className={`spring h-8 shrink-0 rounded-full px-3 text-footnote font-semibold ${tab === g ? 'bg-tint-soft text-on-tint-soft' : 'text-label-2 hover:bg-fill'}`}
           >
-            {s.label}
+            {g === 'Library' ? '★ Library' : g}
           </button>
         ))}
       </div>
+
+      {palette ? (
+        <div className="mt-1 grid max-h-[124px] grid-cols-[repeat(auto-fill,minmax(44px,1fr))] gap-1 overflow-y-auto pr-0.5" role="tabpanel" aria-label={`${palette.group} symbols`} style={{ touchAction: 'pan-y' }}>
+          {palette.items.map((s) => (
+            <button
+              key={s.label + s.tex}
+              type="button"
+              title={s.tex.replace('|', '').trim()}
+              aria-label={s.tex.replace('|', '').trim()}
+              onClick={() => insertSnippet(s.tex)}
+              className="spring h-10 min-w-11 rounded-[10px] bg-fill px-2 text-subhead font-semibold whitespace-nowrap text-label hover:bg-fill-2 active:scale-[0.94]"
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="mt-1 max-h-[200px] overflow-y-auto rounded-[14px] bg-cell shadow-[0_0_0_0.5px_var(--hairline)]" role="tabpanel" aria-label="Equation library" style={{ touchAction: 'pan-y' }}>
+          {LIBRARY.map((g) => (
+            <div key={g.group}>
+              <p className="sticky top-0 bg-cell/95 px-3 pt-2 pb-1 text-caption font-semibold tracking-wide text-label-2 uppercase">{g.group}</p>
+              {g.items.map((t) => (
+                <button
+                  key={t.name}
+                  type="button"
+                  onClick={() => {
+                    setSource(t.tex);
+                    requestAnimationFrame(() => input.current?.focus());
+                  }}
+                  className="spring flex min-h-11 w-full items-center justify-between gap-3 border-b border-hairline px-3 text-left last:border-0 hover:bg-fill"
+                >
+                  <span className="text-subhead text-label">{t.name}</span>
+                  <code className="max-w-[55%] truncate font-mono text-caption text-label-2">{t.tex}</code>
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
 
       <div
         className="mt-2 flex min-h-[112px] items-center justify-center overflow-auto rounded-[18px] bg-bg p-4 shadow-[inset_0_0_0_0.5px_var(--hairline)]"
@@ -213,13 +253,30 @@ export function EquationSheet({ appearance }: { appearance: Appearance }) {
         )}
       </div>
 
-      <footer className="mt-3 flex items-center justify-between gap-3">
-        <p className="text-footnote text-label-2 mobile:hidden">⌘↩ to {editing ? 'update' : 'insert'}</p>
+      <footer className="mt-3 flex items-center justify-between gap-2">
+        <BubbleGroup active={mode} variant="raised" role="radiogroup" label="Display mode" className="flex rounded-full bg-fill p-0.5">
+          {(['block', 'inline'] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              role="radio"
+              aria-checked={mode === m}
+              data-bubble={m}
+              title={m === 'block' ? 'Display style: large limits and fractions' : 'Inline style: compact, sits in a line of text'}
+              onClick={() => setMode(m)}
+              className={`spring relative flex h-9 items-center rounded-full px-3 text-footnote font-semibold ${mode === m ? 'text-label' : 'text-label-2 hover:text-label'}`}
+            >
+              {m === 'block' ? 'Block' : 'Inline'}
+            </button>
+          ))}
+        </BubbleGroup>
+        <ToolButton icon="clipboard" iconSize={17} label="Copy as MathML" disabled={!result} onClick={copyMathML} />
+        <p className="ml-auto text-footnote text-label-2 max-sm:hidden mobile:hidden">⌘↩</p>
         <button
           type="button"
           disabled={!result}
           onClick={place}
-          className="spring ml-auto flex h-11 items-center gap-2 rounded-full bg-tint px-5 text-headline font-semibold text-white shadow-[0_4px_14px_var(--tint-glow)] hover:brightness-105 active:scale-[0.97] disabled:opacity-40 disabled:shadow-none"
+          className="spring flex h-11 items-center gap-2 rounded-full bg-tint px-5 text-headline font-semibold text-white shadow-[0_4px_14px_var(--tint-glow)] hover:brightness-105 active:scale-[0.97] disabled:opacity-40 disabled:shadow-none"
         >
           {editing ? 'Update' : 'Insert'}
         </button>

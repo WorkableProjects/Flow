@@ -4,6 +4,9 @@ import {
   copySelection,
   cutSelection,
   deleteSelection,
+  groupSelection,
+  nudgeSelection,
+  ungroupSelection,
   duplicateSelection,
   goToPage,
   handlePaste,
@@ -41,6 +44,8 @@ export function useShortcuts() {
           z: () => (e.shiftKey ? redo() : undo()),
           y: redo,
           d: duplicateSelection,
+          g: () => (e.shiftKey ? ungroupSelection() : groupSelection()),
+          "'": () => ui.set({ snapGrid: !ui.get().snapGrid }),
           a: selectAll,
           s: saveDocument,
           o: openDocument,
@@ -81,11 +86,27 @@ export function useShortcuts() {
           goToPage(1);
           return;
         case ']':
-          reorderSelection(true);
+        case '}':
+          reorderSelection(e.shiftKey || e.key === '}' ? 'front' : 'forward');
           return;
         case '[':
-          reorderSelection(false);
+        case '{':
+          reorderSelection(e.shiftKey || e.key === '{' ? 'back' : 'backward');
           return;
+        case '?':
+          ui.set({ shortcutsOpen: !ui.get().shortcutsOpen });
+          return;
+        case 'ArrowLeft':
+        case 'ArrowRight':
+        case 'ArrowUp':
+        case 'ArrowDown': {
+          if (!ui.get().selection.size) return;
+          e.preventDefault();
+          const d = e.shiftKey ? 10 : 1;
+          const [dx, dy] = { ArrowLeft: [-d, 0], ArrowRight: [d, 0], ArrowUp: [0, -d], ArrowDown: [0, d] }[e.key]!;
+          nudgeSelection(dx, dy);
+          return;
+        }
       }
       if (k === 'c') {
         const c = ui.get().curtain;

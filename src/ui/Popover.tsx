@@ -10,6 +10,8 @@ interface PopoverProps {
   children: ReactNode;
   className?: string;
   label: string;
+  /** Part of the text editor's chrome: using it doesn't end the edit. */
+  chrome?: boolean;
 }
 
 const GAP = 12;
@@ -19,7 +21,7 @@ const MARGIN = 12;
  * Menus and inspectors render in the overlay layer (outside the stage) so
  * they never become glass-on-glass inside a toolbar.
  */
-export function Popover({ open, onClose, anchor, placement = 'top', children, className = '', label }: PopoverProps) {
+export function Popover({ open, onClose, anchor, placement = 'top', children, className = '', label, chrome }: PopoverProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number; origin: string } | null>(null);
   const { mounted, leaving } = usePresence(open);
@@ -33,9 +35,13 @@ export function Popover({ open, onClose, anchor, placement = 'top', children, cl
       const w = el.offsetWidth, h = el.offsetHeight;
       let left = 0, top = 0, origin = '50% 100%';
       if (placement === 'top' || placement === 'bottom') {
+        // Flip to the other side when the preferred one has no room.
+        let side = placement;
+        if (side === 'top' && a.top - h - GAP < MARGIN && a.bottom + GAP + h <= window.innerHeight - MARGIN) side = 'bottom';
+        else if (side === 'bottom' && a.bottom + GAP + h > window.innerHeight - MARGIN && a.top - h - GAP >= MARGIN) side = 'top';
         left = a.left + a.width / 2 - w / 2;
-        top = placement === 'top' ? a.top - h - GAP : a.bottom + GAP;
-        origin = placement === 'top' ? '50% 100%' : '50% 0%';
+        top = side === 'top' ? a.top - h - GAP : a.bottom + GAP;
+        origin = side === 'top' ? '50% 100%' : '50% 0%';
       } else {
         top = a.top + a.height / 2 - h / 2;
         left = placement === 'left' ? a.left - w - GAP : a.right + GAP;
@@ -78,6 +84,7 @@ export function Popover({ open, onClose, anchor, placement = 'top', children, cl
       role="dialog"
       aria-label={label}
       aria-hidden={leaving || undefined}
+      data-editor-chrome={chrome || undefined}
       className={`sheet ${leaving ? 'pop-out' : 'pop-in'} fixed z-50 ${className}`}
       style={{ left: pos?.left ?? -9999, top: pos?.top ?? -9999, ['--origin' as string]: pos?.origin }}
     >

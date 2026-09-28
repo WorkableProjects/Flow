@@ -3,7 +3,7 @@ import { Icon, type IconName } from '../icons/Icon';
 import { deleteLesson, listLessons, type LessonSummary } from '../engine/persistence';
 import type { Background } from '../engine/types';
 import { importLesson, newLesson, openLesson } from '../state/lessons';
-import { resetProfile, toast, ui, useUI, type AppearancePref, type DevicePref } from '../state/ui';
+import { CREDITS, resetProfile, toast, ui, useUI, type AppearancePref, type DevicePref } from '../state/ui';
 import { Segmented } from '../ui/controls';
 import { BrandBackdrop } from './BrandBackdrop';
 import { Popover } from '../ui/Popover';
@@ -247,7 +247,10 @@ export function Home({ onOpen }: { onOpen: () => void }) {
           )}
         </section>
 
-        <footer className="mt-14 text-center text-caption text-label-3">Flow {__APP_VERSION__}</footer>
+        <footer className="mt-14 text-center text-caption text-label-3">
+          <p>{CREDITS}</p>
+          <p className="mt-0.5">Version {__APP_VERSION__}</p>
+        </footer>
       </div>
 
       <Popover open={settings} onClose={() => setSettings(false)} anchor={settingsRef} placement="bottom" label="Settings" className="w-[320px] max-w-[calc(100vw-24px)] p-4">

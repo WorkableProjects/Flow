@@ -6,8 +6,10 @@
  *
  * Drives real pointer input through Chromium and checks the document model:
  * first-run onboarding, Home (new lesson, recents), ink, shape snapping,
- * erasing, undo/redo, rich text, Apps (Screen Hider, LaTeX), pages, autosave, and the tutor → student-view live
- * sync over BroadcastChannel.
+ * erasing, undo/redo, rich text, Apps (Screen Hider, LaTeX), pages, autosave, the tutor → student-view live
+ * sync over BroadcastChannel, and the 1.2 features: rich text formats and lists, links, polygons and callouts,
+ * partial erasing, grouping, the equation library and MathML, orbital diagrams, SVG/PDF export, PDF import
+ * and read-only share links.
  */
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -30,7 +32,7 @@ const check = (name, ok, detail = '') => {
 
 const browser = await chromium.launch({ executablePath });
 try {
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, permissions: ['clipboard-read', 'clipboard-write'] });
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
@@ -177,6 +179,136 @@ try {
   await page.waitForFunction(() => window.__flowBoard.doc.pages.length === 2);
   const persisted = await page.evaluate(() => window.__flowBoard.doc.pages.map((p) => p.elements.length));
   check('lesson reopens from Recents after reload', persisted.join() === `${n},0`, persisted.join());
+
+
+  // ─── 1.2.0 ─────────────────────────────────────────────────────────
+  await page.bringToFront();
+  await page.getByRole('button', { name: 'All lessons' }).click();
+  await page.waitForTimeout(700);
+  await page.getByRole('button', { name: 'New Lesson' }).click();
+  await page.waitForFunction(() => window.__flowBoard.doc.pages.length === 1 && window.__flowBoard.page.elements.length === 0);
+  await page.getByTestId('board').waitFor();
+  await page.waitForTimeout(700);
+  const els = () => page.evaluate(() => window.__flowBoard.page.elements);
+
+  await page.keyboard.press('t');
+  await page.mouse.click(400, 250);
+  await page.keyboard.type('Steps');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('mix');
+  await page.keyboard.press('Control+Shift+Digit7');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('heat');
+  for (let i = 0; i < 4; i++) await page.keyboard.press('Shift+ArrowLeft');
+  await page.keyboard.press('Control+Shift+x');
+  await page.keyboard.press('Escape');
+  const list = (await els()).find((e) => e.type === 'text');
+  check('rich text: numbered list and strikethrough', list?.text === 'Steps\nmix\nheat' && JSON.stringify(list.paras) === JSON.stringify([{}, { list: 'number' }, { list: 'number' }]) && list.spans?.some((sp) => sp.text === 'heat' && sp.marks?.strike), JSON.stringify(list));
+
+  await page.mouse.click(400, 450);
+  await page.keyboard.type('See ');
+  await page.keyboard.press('Control+k');
+  await page.getByRole('textbox', { name: 'Link address' }).fill('example.com');
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Escape');
+  const linked = (await els()).find((e) => e.type === 'text' && e.text.startsWith('See'));
+  check('rich text: ⌘K adds a safe link', linked?.spans?.some((sp) => sp.marks?.link === 'https://example.com'), JSON.stringify(linked?.spans));
+
+  await page.keyboard.press('g');
+  for (const [x, y] of [[700, 200], [850, 180], [900, 300]]) await page.mouse.click(x, y);
+  await page.mouse.click(700, 200);
+  await page.keyboard.press('b');
+  await draw([[700, 420], [900, 520]]);
+  check('polygon and callout tools', (await types()).filter((t) => t === 'polygon' || t === 'callout').join() === 'polygon,callout', (await types()).join());
+
+  await page.keyboard.press('p');
+  await draw(Array.from({ length: 30 }, (_, i) => [200 + i * 14, 620]));
+  await page.keyboard.press('e');
+  await page.getByRole('radio', { name: /Partial/ }).click();
+  await draw([[400, 590], [400, 650]]);
+  check('partial eraser splits a stroke', (await types()).filter((t) => t === 'stroke').length === 2, (await types()).join());
+  await page.keyboard.press('Control+z');
+  check('partial erase undoes to one stroke', (await types()).filter((t) => t === 'stroke').length === 1);
+  await page.getByRole('radio', { name: /Object/ }).click();
+
+  await page.keyboard.press('v');
+  await page.keyboard.press('Control+a');
+  await page.keyboard.press('Control+g');
+  const grouped = await els();
+  check('⌘G groups the selection', grouped.length > 1 && grouped.every((e) => e.groupId && e.groupId === grouped[0].groupId));
+  await page.keyboard.press('Escape');
+  await page.mouse.click(850, 180);
+  const selectedCount = Number((await page.getByText(/^\d+ selected$/).textContent().catch(() => '0')).match(/\d+/)?.[0]);
+  check('clicking one member selects the whole group', selectedCount === grouped.length, `${selectedCount} of ${grouped.length}`);
+  await page.keyboard.press('Control+z');
+  check('grouping is undoable', (await els()).every((e) => !e.groupId));
+  await page.keyboard.press('Escape');
+
+  await page.getByRole('button', { name: 'Apps' }).click();
+  check('Text is no longer in Apps', (await page.getByRole('button', { name: /^Text Rich text/ }).count()) === 0);
+  await page.getByRole('button', { name: /LaTeX Equation/ }).click();
+  await page.getByRole('tab', { name: /Library/ }).click();
+  await page.getByRole('button', { name: /Quadratic formula/ }).click();
+  await page.getByRole('radio', { name: 'Inline' }).click();
+  await page.waitForFunction(() => !document.querySelector('[aria-label="LaTeX equation"] button:disabled'), null, { timeout: 15000 }).catch(() => {});
+  await page.getByRole('button', { name: 'Insert', exact: true }).click();
+  const quad = (await els()).find((e) => e.type === 'equation');
+  check('equation library inserts an inline equation', quad?.latex.startsWith('x = \\frac') && quad.mode === 'inline', quad?.latex);
+  await page.getByRole('toolbar', { name: 'Selection' }).getByRole('button', { name: 'Copy as MathML' }).click();
+  await page.waitForTimeout(500);
+  check('equation copies as MathML', (await page.evaluate(() => navigator.clipboard.readText())).includes('<mfrac>'));
+  await page.getByRole('button', { name: 'Rotate 90°' }).click();
+  check('equation rotates', (await els()).find((e) => e.type === 'equation')?.rotation === 90);
+
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Apps' }).click();
+  await page.getByRole('button', { name: /Elements/ }).click();
+  await page.getByRole('radio', { name: /Orbital Diagram/ }).click();
+  await page.getByLabel('Find element').fill('N');
+  await page.getByRole('dialog', { name: 'Elements' }).getByRole('button', { name: 'Insert', exact: true }).click();
+  const diagram = await page.evaluate(() => {
+    const els = window.__flowBoard.page.elements;
+    const g = els[els.length - 1].groupId;
+    const mine = els.filter((e) => e.groupId === g);
+    return { boxes: mine.filter((e) => e.kind === 'rect').length, arrows: mine.filter((e) => e.kind === 'arrow').length, config: mine.some((e) => e.text === '1s² 2s² 2p³') };
+  });
+  check('orbital diagram for nitrogen', diagram.boxes === 5 && diagram.arrows === 8 && diagram.config, JSON.stringify(diagram));
+
+  await page.getByRole('button', { name: 'Share & export' }).click();
+  const [svg] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: /Page as SVG/ }).click()]);
+  const svgText = await (await import('node:fs/promises')).readFile(await svg.path(), 'utf8');
+  check('exports the page as SVG', svgText.startsWith('<svg') && svgText.includes('Steps') && svgText.includes('<ellipse') === false && svgText.includes('<path'));
+  await page.getByRole('button', { name: 'Share & export' }).click();
+  const [pdf] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: /Lesson as PDF/ }).click()]);
+  const pdfPath = await pdf.path();
+  const pdfBytes = await (await import('node:fs/promises')).readFile(pdfPath);
+  check('exports the lesson as PDF', pdfBytes.subarray(0, 5).toString() === '%PDF-' && pdfBytes.includes('/DCTDecode'));
+
+  // PDF import: bring our own export back in as a locked page image.
+  const pagesBefore = await page.evaluate(() => window.__flowBoard.doc.pages.length);
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), (async () => {
+    await page.getByRole('button', { name: 'Share & export' }).click();
+    await page.getByRole('button', { name: /Import PDF/ }).click();
+  })()]);
+  await chooser.setFiles({ name: 'worksheet.pdf', mimeType: 'application/pdf', buffer: pdfBytes });
+  await page.waitForFunction((n) => window.__flowBoard.doc.pages.length === n + 1, pagesBefore, { timeout: 20000 }).catch(() => {});
+  const imported = await page.evaluate(() => window.__flowBoard.page.elements);
+  check('imports a PDF page onto a new page, locked', imported.length === 1 && imported[0].type === 'image' && imported[0].locked === true, JSON.stringify(imported.map((e) => e.type)));
+  await page.keyboard.press('e');
+  await draw([[500, 300], [800, 500]]);
+  check('the eraser leaves locked pages alone', (await page.evaluate(() => window.__flowBoard.page.elements.length)) === 1);
+  await page.keyboard.press('Control+z');
+  await page.keyboard.press('Control+z');
+
+  await page.getByRole('button', { name: 'Share & export' }).click();
+  await page.getByRole('button', { name: /read-only link/ }).click();
+  await page.waitForTimeout(600);
+  const link = await page.evaluate(() => navigator.clipboard.readText());
+  const shared = await ctx.newPage();
+  await shared.goto(link);
+  await shared.getByText('Read-only').waitFor({ timeout: 5000 }).catch(() => {});
+  check('read-only share link opens a preview', link.includes('view=shared#d=') && (await shared.getByRole('button', { name: /Save a Copy/ }).isVisible()));
+  await shared.close();
 
   // Reset Profile brings back the first-launch welcome.
   await page.getByRole('button', { name: 'All lessons' }).click().catch(() => {});
